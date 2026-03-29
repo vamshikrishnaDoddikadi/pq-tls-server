@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  pq-tls-server:
+    build: .
+    ports:
+      - "8443:8443"
+      - "9090:9090"
+    volumes:
+      - ./certs:/etc/pq-tls-server/certs:ro
+      - ./etc/pq-tls-server.conf:/etc/pq-tls-server/pq-tls-server.conf:ro
+    environment:
+      - OPENSSL_MODULES=/app/vendor/oqs-provider/build/lib
+      - LD_LIBRARY_PATH=/app/vendor/liboqs/lib
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  # Example backend — replace with your actual application
+  backend:
+    image: nginx:alpine
+    ports:
+      - "8080:80"

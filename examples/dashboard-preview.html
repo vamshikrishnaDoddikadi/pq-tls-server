@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PQ-TLS Server Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;padding:20px}
+h1{text-align:center;margin-bottom:8px;font-size:1.8em;background:linear-gradient(90deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{text-align:center;color:#8b949e;margin-bottom:24px;font-size:.9em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:20px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;transition:border-color .2s}
+.card:hover{border-color:#58a6ff44}
+.card h3{color:#8b949e;font-size:.85em;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.metric{font-size:2.2em;font-weight:700}
+.metric.green{color:#3fb950}
+.metric.blue{color:#58a6ff}
+.metric.purple{color:#bc8cff}
+.metric.orange{color:#d29922}
+.metric.red{color:#f85149}
+.chart-container{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:20px}
+.chart-container h3{color:#8b949e;font-size:.85em;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+canvas{width:100%!important;height:200px!important}
+.pq-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:.8em;font-weight:600;margin-top:4px}
+.pq-badge.active{background:#1f3a1f;color:#3fb950;border:1px solid #238636}
+.pq-badge.fallback{background:#3a2f1f;color:#d29922;border:1px solid #9e6a03}
+.status-bar{display:flex;gap:12px;justify-content:center;margin-bottom:20px;flex-wrap:wrap}
+.status-item{padding:6px 16px;border-radius:8px;font-size:.85em;background:#161b22;border:1px solid #30363d}
+.status-item .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot.green{background:#3fb950}
+.dot.red{background:#f85149}
+.upstreams{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:20px}
+.upstreams h3{color:#8b949e;font-size:.85em;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.upstream-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #21262d}
+.upstream-row:last-child{border-bottom:none}
+.upstream-name{font-family:monospace;color:#58a6ff;flex:1}
+.upstream-status{padding:3px 10px;border-radius:12px;font-size:.75em;font-weight:600}
+.upstream-status.healthy{background:#1f3a1f;color:#3fb950}
+.upstream-status.unhealthy{background:#3a1f1f;color:#f85149}
+.upstream-bar{flex:2;height:6px;background:#21262d;border-radius:3px;overflow:hidden}
+.upstream-fill{height:100%;border-radius:3px;transition:width .5s ease}
+.mode-banner{text-align:center;margin-bottom:16px;padding:8px 16px;background:#1a1a2e;border:1px solid #30363d;border-radius:8px;font-size:.8em;color:#bc8cff}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head><body>
+<h1>PQ-TLS Server Dashboard</h1>
+<p class="subtitle">Post-Quantum TLS Termination Proxy &mdash; Real-time Monitoring</p>
+
+<div class="mode-banner" id="modeBanner">
+  LIVE PREVIEW &mdash; Simulated data. Connect to server at <code>http://localhost:9090</code> for real metrics.
+</div>
+
+<div class="status-bar" id="statusBar">
+  <span class="status-item"><span class="dot green" id="statusDot"></span><span id="statusText">Connected</span></span>
+  <span class="status-item">Uptime: <span id="uptime">0m 0s</span></span>
+  <span class="status-item">TLS 1.3 <span style="color:#3fb950">&#10003;</span></span>
+  <span class="status-item">ML-KEM-768 <span style="color:#bc8cff">&#10003;</span></span>
+</div>
+
+<div class="grid">
+  <div class="card"><h3>Active Connections</h3><div class="metric blue" id="activeConns">0</div></div>
+  <div class="card"><h3>Total Connections</h3><div class="metric green" id="totalConns">0</div></div>
+  <div class="card"><h3>Handshake Failures</h3><div class="metric red" id="hsFails">0</div></div>
+  <div class="card"><h3>PQ Negotiations</h3><div class="metric purple" id="pqCount">0</div><span class="pq-badge active" id="pqBadge">ML-KEM-768 + X25519</span></div>
+  <div class="card"><h3>Classical Fallbacks</h3><div class="metric orange" id="classicalCount">0</div><span class="pq-badge fallback">X25519 Only</span></div>
+  <div class="card"><h3>Throughput</h3><div class="metric blue" id="throughput">0 B/s</div></div>
+</div>
+
+<div class="grid">
+  <div class="chart-container"><h3>Connections Over Time</h3><canvas id="connChart"></canvas></div>
+  <div class="chart-container"><h3>PQ vs Classical Negotiation</h3><canvas id="pqChart"></canvas></div>
+</div>
+<div class="chart-container"><h3>Throughput (KB/s)</h3><canvas id="tputChart"></canvas></div>
+
+<div class="upstreams">
+  <h3>Upstream Backends</h3>
+  <div class="upstream-row">
+    <span class="upstream-name">127.0.0.1:8080</span>
+    <span class="upstream-status healthy" id="up1Status">HEALTHY</span>
+    <div class="upstream-bar"><div class="upstream-fill" id="up1Bar" style="width:65%;background:linear-gradient(90deg,#58a6ff,#3fb950)"></div></div>
+    <span style="color:#8b949e;font-size:.8em" id="up1Conns">32 conn</span>
+  </div>
+  <div class="upstream-row">
+    <span class="upstream-name">127.0.0.1:8081</span>
+    <span class="upstream-status healthy" id="up2Status">HEALTHY</span>
+    <div class="upstream-bar"><div class="upstream-fill" id="up2Bar" style="width:35%;background:linear-gradient(90deg,#58a6ff,#3fb950)"></div></div>
+    <span style="color:#8b949e;font-size:.8em" id="up2Conns">18 conn</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Rate Limiting</h3>
+    <div style="margin-top:8px">
+      <div style="display:flex;justify-content:space-between;font-size:.85em;color:#8b949e;margin-bottom:4px">
+        <span>Requests / sec</span>
+        <span id="rateVal">0 / 100</span>
+      </div>
+      <div style="height:8px;background:#21262d;border-radius:4px;overflow:hidden">
+        <div id="rateBar" style="height:100%;width:0%;background:linear-gradient(90deg,#3fb950,#d29922);border-radius:4px;transition:width .5s"></div>
+      </div>
+    </div>
+    <div style="margin-top:12px;font-size:.8em;color:#8b949e">
+      Blocked IPs: <span id="blockedIPs" style="color:#f85149">0</span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>TLS Session Cache</h3>
+    <div style="margin-top:8px">
+      <div style="display:flex;justify-content:space-between;font-size:.85em;color:#8b949e;margin-bottom:4px">
+        <span>Cache Hit Rate</span>
+        <span id="cacheRate">0%</span>
+      </div>
+      <div style="height:8px;background:#21262d;border-radius:4px;overflow:hidden">
+        <div id="cacheBar" style="height:100%;width:0%;background:#bc8cff;border-radius:4px;transition:width .5s"></div>
+      </div>
+    </div>
+    <div style="margin-top:12px;font-size:.8em;color:#8b949e">
+      Sessions: <span id="sessionCount" style="color:#58a6ff">0</span> / 10,000
+    </div>
+  </div>
+</div>
+
+<script>
+const MAX_POINTS = 60;
+let labels = [], connData = [], tputData = [], startTime = Date.now();
+let totalConns = 0, pqNeg = 0, classicalNeg = 0, hsFails = 0, bytesTotal = 0;
+
+const chartDefaults = {
+  responsive: true,
+  animation: false,
+  scales: {
+    x: { display: false },
+    y: { beginAtZero: true, grid: { color: '#21262d' }, ticks: { color: '#8b949e' } }
+  },
+  plugins: { legend: { display: false } }
+};
+
+const connChart = new Chart(document.getElementById('connChart'), {
+  type: 'line',
+  data: { labels, datasets: [{ label: 'Active', data: connData, borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,.1)', fill: true, tension: .3, pointRadius: 0 }] },
+  options: chartDefaults
+});
+
+const pqChart = new Chart(document.getElementById('pqChart'), {
+  type: 'doughnut',
+  data: { labels: ['ML-KEM-768 (Post-Quantum)', 'X25519 (Classical)'], datasets: [{ data: [0, 0], backgroundColor: ['#bc8cff', '#d29922'], borderWidth: 0, hoverOffset: 8 }] },
+  options: { responsive: true, plugins: { legend: { labels: { color: '#e1e4e8', padding: 16 } } } }
+});
+
+const tputChart = new Chart(document.getElementById('tputChart'), {
+  type: 'line',
+  data: { labels, datasets: [{ label: 'KB/s', data: tputData, borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,.1)', fill: true, tension: .3, pointRadius: 0 }] },
+  options: chartDefaults
+});
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B/s';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB/s';
+  return (b / 1048576).toFixed(1) + ' MB/s';
+}
+
+function formatUptime(ms) {
+  let s = Math.floor(ms / 1000);
+  let m = Math.floor(s / 60); s %= 60;
+  let h = Math.floor(m / 60); m %= 60;
+  let d = Math.floor(h / 24); h %= 24;
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + s + 's';
+}
+
+/* Simulate realistic server traffic */
+function simulate() {
+  let active = Math.floor(Math.random() * 40) + 5 + Math.floor(15 * Math.sin(Date.now() / 10000));
+  active = Math.max(0, active);
+  let newConns = Math.floor(Math.random() * 8) + 1;
+  totalConns += newConns;
+
+  /* 78% PQ, 22% classical - realistic hybrid deployment */
+  for (let i = 0; i < newConns; i++) {
+    if (Math.random() < 0.78) pqNeg++; else classicalNeg++;
+  }
+
+  /* Occasional handshake failure */
+  if (Math.random() < 0.02) hsFails++;
+
+  let throughputRate = (Math.random() * 300 + 50) * 1024;
+  bytesTotal += throughputRate;
+
+  document.getElementById('activeConns').textContent = active;
+  document.getElementById('totalConns').textContent = totalConns.toLocaleString();
+  document.getElementById('hsFails').textContent = hsFails;
+  document.getElementById('pqCount').textContent = pqNeg.toLocaleString();
+  document.getElementById('classicalCount').textContent = classicalNeg.toLocaleString();
+  document.getElementById('throughput').textContent = formatBytes(Math.floor(throughputRate));
+  document.getElementById('uptime').textContent = formatUptime(Date.now() - startTime);
+
+  /* Rate limiter */
+  let rps = Math.floor(Math.random() * 60 + 20);
+  document.getElementById('rateVal').textContent = rps + ' / 100';
+  document.getElementById('rateBar').style.width = rps + '%';
+  if (rps > 80) document.getElementById('rateBar').style.background = 'linear-gradient(90deg,#d29922,#f85149)';
+  else document.getElementById('rateBar').style.background = 'linear-gradient(90deg,#3fb950,#d29922)';
+  document.getElementById('blockedIPs').textContent = Math.floor(hsFails * 0.3);
+
+  /* TLS cache */
+  let cacheHit = Math.min(95, 40 + totalConns * 0.05 + Math.random() * 10);
+  document.getElementById('cacheRate').textContent = cacheHit.toFixed(1) + '%';
+  document.getElementById('cacheBar').style.width = cacheHit + '%';
+  document.getElementById('sessionCount').textContent = Math.min(10000, Math.floor(totalConns * 0.7)).toLocaleString();
+
+  /* Upstreams */
+  let up1 = Math.floor(active * 0.6 + Math.random() * 5);
+  let up2 = active - up1;
+  document.getElementById('up1Conns').textContent = up1 + ' conn';
+  document.getElementById('up2Conns').textContent = Math.max(0, up2) + ' conn';
+  document.getElementById('up1Bar').style.width = Math.min(100, up1 * 2) + '%';
+  document.getElementById('up2Bar').style.width = Math.min(100, Math.max(0, up2) * 2.5) + '%';
+
+  /* Charts */
+  let now = new Date().toLocaleTimeString();
+  labels.push(now);
+  connData.push(active);
+  tputData.push(throughputRate / 1024);
+  if (labels.length > MAX_POINTS) { labels.shift(); connData.shift(); tputData.shift(); }
+
+  connChart.update();
+  tputChart.update();
+  pqChart.data.datasets[0].data = [pqNeg, classicalNeg];
+  pqChart.update();
+}
+
+/* Try real server first, fall back to simulation */
+let useSimulation = true;
+
+function tryLiveConnection() {
+  fetch('/api/stats').then(r => r.json()).then(d => {
+    document.getElementById('modeBanner').innerHTML = 'LIVE &mdash; Connected to PQ-TLS server';
+    document.getElementById('modeBanner').style.borderColor = '#238636';
+    document.getElementById('modeBanner').style.color = '#3fb950';
+    useSimulation = false;
+    const evtSrc = new EventSource('/api/stream');
+    evtSrc.onmessage = function(e) {
+      const d = JSON.parse(e.data);
+      document.getElementById('activeConns').textContent = d.active_connections;
+      document.getElementById('totalConns').textContent = d.total_connections;
+      document.getElementById('hsFails').textContent = d.handshake_failures;
+      document.getElementById('pqCount').textContent = d.pq_negotiations || 0;
+      document.getElementById('classicalCount').textContent = d.classical_negotiations || 0;
+      document.getElementById('uptime').textContent = formatUptime(Date.now() - startTime);
+      let rate = (d.bytes_in + d.bytes_out) - bytesTotal;
+      bytesTotal = d.bytes_in + d.bytes_out;
+      document.getElementById('throughput').textContent = formatBytes(Math.max(0, rate));
+
+      let now = new Date().toLocaleTimeString();
+      labels.push(now); connData.push(d.active_connections); tputData.push(Math.max(0, rate) / 1024);
+      if (labels.length > MAX_POINTS) { labels.shift(); connData.shift(); tputData.shift(); }
+      connChart.update(); tputChart.update();
+      pqChart.data.datasets[0].data = [d.pq_negotiations || 0, d.classical_negotiations || 0];
+      pqChart.update();
+    };
+    evtSrc.onerror = function() {
+      document.getElementById('statusDot').className = 'dot red';
+      document.getElementById('statusText').textContent = 'Disconnected';
+    };
+  }).catch(() => {
+    /* Server not running, use simulation */
+  });
+}
+
+tryLiveConnection();
+setInterval(() => { if (useSimulation) simulate(); }, 1000);
+</script>
+</body></html>

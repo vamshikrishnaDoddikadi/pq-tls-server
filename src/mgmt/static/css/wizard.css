@@ -1,0 +1,128 @@
+/* Setup wizard — Cyberpunk HUD Theme */
+.setup-overlay {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.wizard-card {
+    background: rgba(10,10,20,0.9);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 40px;
+    width: 520px;
+    max-width: 90vw;
+    box-shadow: 0 0 40px rgba(6,182,212,0.05);
+}
+
+.wizard-card h2 {
+    text-align: center;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.wizard-subtitle {
+    text-align: center;
+    color: var(--text-muted);
+    margin-bottom: 28px;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.wizard-steps {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 28px;
+}
+
+.wizard-step {
+    width: 32px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--bg-tertiary);
+    transition: background 0.3s, box-shadow 0.3s;
+}
+
+.wizard-step.active {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 8px rgba(6,182,212,0.4);
+}
+
+.wizard-step.done {
+    background: var(--accent-green);
+    box-shadow: 0 0 8px rgba(16,185,129,0.4);
+}
+
+.wizard-body { min-height: 200px; }
+
+.wizard-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 28px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+}
+
+.password-strength {
+    height: 4px;
+    border-radius: 2px;
+    margin-top: 6px;
+    transition: all 0.3s;
+}
+
+.password-strength.weak {
+    background: var(--accent-red);
+    width: 33%;
+    box-shadow: 0 0 6px rgba(239,68,68,0.4);
+}
+
+.password-strength.medium {
+    background: var(--accent-orange);
+    width: 66%;
+    box-shadow: 0 0 6px rgba(245,158,11,0.4);
+}
+
+.password-strength.strong {
+    background: var(--accent-green);
+    width: 100%;
+    box-shadow: 0 0 6px rgba(16,185,129,0.4);
+}
+
+.wizard-welcome {
+    text-align: center;
+    padding: 20px 0;
+}
+
+.wizard-welcome p {
+    color: var(--text-secondary);
+    margin-top: 12px;
+    line-height: 1.7;
+}
+
+.wizard-review {
+    font-size: 0.9em;
+}
+
+.wizard-review dt {
+    color: var(--text-muted);
+    font-size: 0.8em;
+    margin-top: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.wizard-review dd {
+    margin-left: 0;
+    padding: 4px 0;
+}

@@ -1,0 +1,263 @@
+/* ======================================================================== */
+/* HUD Grid Layout + Chart Containers — Cyberpunk Theme                    */
+/* ======================================================================== */
+
+/* ---- 3-Column HUD Grid ---- */
+.hud-grid {
+    display: grid;
+    grid-template-columns: 3fr 6fr 3fr;
+    gap: 16px;
+    margin-bottom: 20px;
+    min-height: 0;
+}
+
+.hud-grid-left,
+.hud-grid-center,
+.hud-grid-right {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+}
+
+/* ---- Top Stats Row ---- */
+.hud-stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+/* ---- Chart Containers ---- */
+.chart-container {
+    background: rgba(10,10,20,0.8);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 0;
+    height: auto;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Subtle scanline on chart panels */
+.chart-container::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(6,182,212,0.008) 3px,
+        rgba(6,182,212,0.008) 6px
+    );
+    pointer-events: none;
+    z-index: 1;
+}
+
+.chart-container h3 {
+    color: var(--text-muted);
+    font-size: 0.65em;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
+    position: relative;
+    z-index: 2;
+}
+
+.chart-container canvas {
+    width: 100% !important;
+    height: 180px !important;
+    position: relative;
+    z-index: 2;
+}
+
+/* Legacy chart-row kept for compatibility */
+.chart-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+/* ---- PQ Adoption Ring ---- */
+.pq-adoption-ring {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    position: relative;
+    margin: 0 auto 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* conic-gradient set via JS */
+    background: conic-gradient(
+        var(--accent-purple) 0%,
+        var(--accent-purple) 0%,
+        var(--border) 0%,
+        var(--border) 100%
+    );
+}
+
+.pq-adoption-ring::before {
+    content: '';
+    position: absolute;
+    inset: 12px;
+    background: var(--bg-primary);
+    border-radius: 50%;
+}
+
+.pq-adoption-ring .pq-pct {
+    position: relative;
+    z-index: 1;
+    font-size: 1.8em;
+    font-weight: 700;
+    color: var(--accent-purple);
+    text-shadow: 0 0 15px rgba(217,70,239,0.5);
+    font-variant-numeric: tabular-nums;
+}
+
+.pq-adoption-ring .pq-pct-label {
+    position: absolute;
+    bottom: -4px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.55em;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    z-index: 1;
+}
+
+/* ---- Upstream Health Bars ---- */
+.upstream-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 0.75em;
+}
+
+.upstream-bar-label {
+    min-width: 80px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 0.85em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.upstream-bar-track {
+    flex: 1;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.upstream-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+}
+
+.upstream-bar-fill.healthy {
+    background: var(--accent-green);
+    box-shadow: 0 0 6px rgba(16,185,129,0.4);
+}
+
+.upstream-bar-fill.degraded {
+    background: var(--accent-orange);
+    box-shadow: 0 0 6px rgba(245,158,11,0.4);
+}
+
+.upstream-bar-fill.down {
+    background: var(--accent-red);
+    box-shadow: 0 0 6px rgba(239,68,68,0.4);
+}
+
+.upstream-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.upstream-dot.healthy { background: var(--accent-green); box-shadow: 0 0 4px rgba(16,185,129,0.5); }
+.upstream-dot.degraded { background: var(--accent-orange); box-shadow: 0 0 4px rgba(245,158,11,0.5); }
+.upstream-dot.down { background: var(--accent-red); box-shadow: 0 0 4px rgba(239,68,68,0.5); }
+
+/* ---- System Info Panel ---- */
+.sys-info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 0.8em;
+    border-bottom: 1px solid rgba(26,26,46,0.4);
+}
+
+.sys-info-row:last-child { border-bottom: none; }
+
+.sys-info-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 0.85em;
+}
+
+.sys-info-value {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ======================================================================== */
+/* Responsive Breakpoints                                                   */
+/* ======================================================================== */
+
+/* Full 3-column HUD — >1200px (default) */
+
+/* Medium: center full-width, left+right side-by-side */
+@media (max-width: 1200px) and (min-width: 901px) {
+    .hud-grid {
+        grid-template-columns: 1fr;
+    }
+    .hud-grid-center {
+        order: -1;
+    }
+    .hud-grid-left,
+    .hud-grid-right {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+    }
+}
+
+/* Small: single column stack */
+@media (max-width: 900px) {
+    .hud-grid {
+        grid-template-columns: 1fr;
+    }
+    .hud-grid-center {
+        order: -1;
+    }
+    .hud-stats-row {
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    }
+    .chart-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Extra small: sidebar collapses (handled in main.css) */
+@media (max-width: 768px) {
+    .hud-stats-row {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+    }
+    .pq-adoption-ring {
+        width: 110px;
+        height: 110px;
+    }
+}

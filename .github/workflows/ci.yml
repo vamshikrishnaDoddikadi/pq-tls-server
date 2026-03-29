@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build \
+            libssl-dev pkg-config astyle
+
+      - name: Build liboqs (vendored)
+        run: |
+          git clone --depth 1 --branch 0.11.0 \
+            https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
+          cd /tmp/liboqs && mkdir build && cd build
+          cmake -GNinja \
+            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/vendor/liboqs \
+            -DBUILD_SHARED_LIBS=ON \
+            -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65;SIG_ml_dsa_44;SIG_ml_dsa_87" \
+            ..
+          ninja
+          ninja install
+
+      - name: Build oqs-provider (vendored)
+        run: |
+          git clone --depth 1 --branch 0.7.0 \
+            https://github.com/open-quantum-safe/oqs-provider.git /tmp/oqs-provider
+          cd /tmp/oqs-provider && mkdir build && cd build
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -Dliboqs_DIR=$GITHUB_WORKSPACE/vendor/liboqs/lib/cmake/liboqs \
+            ..
+          ninja
+          mkdir -p $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib
+          cp lib/oqsprovider.so $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib/ 2>/dev/null \
+            || find . -name 'oqsprovider.so' -exec cp {} $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib/ \;
+
+      - name: Download Chart.js vendor
+        run: |
+          curl -sL -o src/mgmt/static/vendor/chart.min.js \
+            https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
+
+      - name: Embed frontend assets
+        run: bash tools/embed_assets.sh
+
+      - name: Build pq-tls-server
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DOQS_INCLUDE_DIR=$GITHUB_WORKSPACE/vendor/liboqs/include \
+                -DOQS_LIBRARY=$GITHUB_WORKSPACE/vendor/liboqs/lib/liboqs.so \
+                ..
+          make -j$(nproc)
+
+      - name: Run tests
+        run: |
+          LD_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/liboqs/lib \
+            ./build/bin/pq-tls-tests
+
+      - name: Verify binary
+        run: |
+          LD_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/liboqs/lib \
+            ./build/bin/pq-tls-server --help
+
+      - name: Upload binary
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pq-tls-server-linux-amd64
+          path: build/bin/pq-tls-server
+
+  docker:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t pq-tls-server .

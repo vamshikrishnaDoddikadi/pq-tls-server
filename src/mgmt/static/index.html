@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PQ-TLS Server — Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/charts.css">
+    <link rel="stylesheet" href="css/wizard.css">
+    <script src="vendor/chart.min.js"></script>
+</head>
+<body>
+    <!-- Login overlay -->
+    <div id="loginOverlay" class="login-overlay" style="display:none">
+        <div id="loginContainer"></div>
+    </div>
+
+    <!-- Setup wizard overlay -->
+    <div id="setupOverlay" class="setup-overlay" style="display:none">
+        <div id="setupContainer"></div>
+    </div>
+
+    <!-- Restart banner -->
+    <div id="restartBanner" class="restart-banner" style="display:none">
+        <span>Configuration changes require a server restart to take effect.</span>
+        <button onclick="PQ.restartServer()">Restart Now</button>
+        <button class="dismiss" onclick="this.parentElement.style.display='none'">Dismiss</button>
+    </div>
+
+    <!-- Main layout -->
+    <div class="app-layout" id="appLayout" style="display:none">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">[ PQ-TLS ]</h1>
+                <span class="logo-sub">Management</span>
+            </div>
+
+            <div class="nav-links">
+                <a href="#/dashboard" class="nav-link" data-page="dashboard">
+                    <span class="nav-icon">[&gt;]</span> DASHBOARD
+                </a>
+                <a href="#/tls" class="nav-link" data-page="tls">
+                    <span class="nav-icon">[&gt;]</span> TLS / SSL
+                </a>
+                <a href="#/upstreams" class="nav-link" data-page="upstreams">
+                    <span class="nav-icon">[&gt;]</span> UPSTREAMS
+                </a>
+                <a href="#/security" class="nav-link" data-page="security">
+                    <span class="nav-icon">[&gt;]</span> SECURITY
+                </a>
+                <a href="#/settings" class="nav-link" data-page="settings">
+                    <span class="nav-icon">[&gt;]</span> SETTINGS
+                </a>
+                <a href="#/certificates" class="nav-link" data-page="certificates">
+                    <span class="nav-icon">[&gt;]</span> CERTIFICATES
+                </a>
+                <a href="#/logs" class="nav-link" data-page="logs">
+                    <span class="nav-icon">[&gt;]</span> LOGS
+                </a>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-branding">
+                    Architected by <a href="https://www.linkedin.com/in/vamshivivaan" target="_blank" rel="noopener">Vamshi Krishna</a>
+                </div>
+                <a href="#" class="nav-link" id="logoutBtn">
+                    <span class="nav-icon">[X]</span> LOGOUT
+                </a>
+            </div>
+        </nav>
+
+        <!-- Content area -->
+        <main class="content" id="pageContent">
+            <div class="loading">Loading...</div>
+        </main>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Modal container -->
+    <div id="modalOverlay" class="modal-overlay" style="display:none">
+        <div id="modalContent" class="modal-content"></div>
+    </div>
+
+    <!-- Core scripts -->
+    <script src="js/components/toast.js"></script>
+    <script src="js/components/modal.js"></script>
+    <script src="js/components/table.js"></script>
+    <script src="js/components/form.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/pages/login.js"></script>
+    <script src="js/pages/setup.js"></script>
+    <script src="js/pages/dashboard.js"></script>
+    <script src="js/pages/tls.js"></script>
+    <script src="js/pages/upstreams.js"></script>
+    <script src="js/pages/security.js"></script>
+    <script src="js/pages/settings.js"></script>
+    <script src="js/pages/certificates.js"></script>
+    <script src="js/pages/logs.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

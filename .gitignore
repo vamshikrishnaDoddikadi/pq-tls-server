@@ -1,0 +1,60 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+
+# Binary
+/pq-tls-server
+bin/
+
+# CMake generated files (in build directories)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+CTestTestfile.cmake
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Certificates (don't commit real production certs)
+/certs/
+*.srl
+# Example certs are explicitly tracked for testing:
+#   examples/certs/*.pem, examples/certs/*.csr
+
+# Environment (may contain secrets)
+.env
+
+# Logs
+*.log
+
+# PID files
+*.pid
+
+# Package files
+*.zip
+*.tar.gz
+*.deb
+*.rpm
+
+# Vendored build-time dependencies (built from source by scripts/build-and-run.sh)
+vendor/
+
+# Vendored Chart.js (downloaded, not committed — use placeholder or download)
+src/mgmt/static/vendor/chart.min.js
+
+# Stale nested project copy
+pq-tls-server/
+
+# Production release output
+PROD_RELEASE/
