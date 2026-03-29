@@ -1,6 +1,6 @@
 # PQ-TLS Server
 
-[![CI](https://github.com/vamshikrishna/pq-tls-server/actions/workflows/ci.yml/badge.svg)](https://github.com/vamshikrishna/pq-tls-server/actions/workflows/ci.yml)
+[![CI](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/actions/workflows/ci.yml/badge.svg)](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TLS 1.3](https://img.shields.io/badge/TLS-1.3-green.svg)]()
 [![Post-Quantum](https://img.shields.io/badge/Post--Quantum-ML--KEM--768-purple.svg)]()
