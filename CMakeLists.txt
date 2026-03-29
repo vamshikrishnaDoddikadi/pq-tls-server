@@ -19,6 +19,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat=2 -Wformat-security")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-strong")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_FORTIFY_SOURCE=2")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
 
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
