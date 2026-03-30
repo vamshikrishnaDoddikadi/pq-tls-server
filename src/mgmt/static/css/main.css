@@ -794,6 +794,224 @@ input:disabled, select:disabled {
 .hud-terminal .log-info  { color: var(--accent-cyan); }
 .hud-terminal .log-time  { color: var(--text-muted); }
 
+/* ======================================================================== */
+/* CRYPTO AGILITY PANEL                                                     */
+/* ======================================================================== */
+
+.algo-list {
+    min-height: 48px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.algo-list-header {
+    font-size: 0.65em;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.algo-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+    position: relative;
+}
+
+.algo-card:hover {
+    border-color: rgba(6,182,212,0.4);
+    box-shadow: 0 0 12px rgba(6,182,212,0.1);
+}
+
+.algo-card.disabled {
+    opacity: 0.5;
+}
+
+.algo-card.dragging {
+    opacity: 0.4;
+    border-style: dashed;
+    border-color: var(--accent-cyan);
+}
+
+.algo-card.drag-over {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 15px rgba(6,182,212,0.3);
+}
+
+.algo-card .drag-handle {
+    cursor: grab;
+    color: var(--text-muted);
+    font-size: 1.1em;
+    line-height: 1;
+    user-select: none;
+}
+
+.algo-card .drag-handle:active {
+    cursor: grabbing;
+}
+
+.algo-priority-num {
+    font-size: 0.75em;
+    color: var(--accent-cyan);
+    font-weight: 700;
+    min-width: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.algo-card-name {
+    font-weight: 600;
+    font-size: 0.85em;
+    flex: 1;
+    letter-spacing: 0.5px;
+}
+
+.algo-card-badges {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.algo-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.6em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border: 1px solid;
+    white-space: nowrap;
+}
+
+/* NIST Level badges */
+.algo-badge-l1 {
+    background: rgba(245,158,11,0.1);
+    color: var(--accent-orange);
+    border-color: rgba(245,158,11,0.3);
+}
+
+.algo-badge-l3 {
+    background: rgba(6,182,212,0.1);
+    color: var(--accent-cyan);
+    border-color: rgba(6,182,212,0.3);
+}
+
+.algo-badge-l5 {
+    background: rgba(217,70,239,0.1);
+    color: var(--accent-purple);
+    border-color: rgba(217,70,239,0.3);
+}
+
+/* Family badges */
+.algo-badge-hybrid {
+    background: rgba(217,70,239,0.1);
+    color: var(--accent-purple);
+    border-color: rgba(217,70,239,0.3);
+}
+
+.algo-badge-classical {
+    background: rgba(245,158,11,0.1);
+    color: var(--accent-orange);
+    border-color: rgba(245,158,11,0.3);
+}
+
+.algo-badge-pq {
+    background: rgba(139,92,246,0.1);
+    color: #8b5cf6;
+    border-color: rgba(139,92,246,0.3);
+}
+
+/* Status badges */
+.algo-badge-standard {
+    background: rgba(16,185,129,0.1);
+    color: var(--accent-green);
+    border-color: rgba(16,185,129,0.3);
+}
+
+.algo-badge-candidate {
+    background: rgba(245,158,11,0.1);
+    color: var(--accent-orange);
+    border-color: rgba(245,158,11,0.3);
+}
+
+.algo-badge-experimental {
+    background: rgba(239,68,68,0.1);
+    color: var(--accent-red);
+    border-color: rgba(239,68,68,0.3);
+}
+
+.algo-badge-deprecated {
+    background: rgba(239,68,68,0.06);
+    color: rgba(239,68,68,0.5);
+    border-color: rgba(239,68,68,0.15);
+}
+
+/* Card action buttons (add/remove) */
+.algo-card-action {
+    cursor: pointer;
+    font-size: 1.2em;
+    color: var(--text-muted);
+    transition: color 0.2s, text-shadow 0.2s;
+    line-height: 1;
+    user-select: none;
+}
+
+.algo-card-action:hover {
+    color: var(--accent-red);
+    text-shadow: 0 0 8px rgba(239,68,68,0.4);
+}
+
+.algo-card-action.add:hover {
+    color: var(--accent-green);
+    text-shadow: 0 0 8px rgba(16,185,129,0.4);
+}
+
+/* Preview & drop indicator */
+.algo-preview-wrap {
+    margin-top: 16px;
+}
+
+.algo-preview-wrap label {
+    font-size: 0.7em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 6px;
+    display: block;
+}
+
+.algo-preview {
+    background: rgba(0,0,0,0.6);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    color: var(--accent-cyan);
+    word-break: break-all;
+    text-shadow: 0 0 8px rgba(6,182,212,0.3);
+}
+
+.drop-indicator {
+    height: 2px;
+    background: var(--accent-cyan);
+    box-shadow: 0 0 8px rgba(6,182,212,0.6);
+    border-radius: 1px;
+    pointer-events: none;
+}
+
 /* ---- Keyframe Animations ---- */
 @keyframes scanline {
     0%   { transform: translateY(0); }

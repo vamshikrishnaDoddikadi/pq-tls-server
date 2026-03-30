@@ -114,6 +114,11 @@ var API = (function() {
         /* Logs */
         logsRecent: function(lines) {
             return request('GET', '/api/logs/recent?lines=' + (lines || 100));
+        },
+
+        /* Algorithms (public — no auth) */
+        getAlgorithms: function() {
+            return fetch('/api/algorithms').then(function(r) { return r.json(); });
         }
     };
 })();

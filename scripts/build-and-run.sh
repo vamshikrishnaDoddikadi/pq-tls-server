@@ -253,9 +253,22 @@ sleep 1
 
 # PQ-TLS Server — set OPENSSL_MODULES so OpenSSL finds oqsprovider.so,
 # and LD_LIBRARY_PATH so the dlopen'd provider can find liboqs.so
+# Create persistent config file if it doesn't exist (preserves setup/credentials across restarts)
+CONFIG_FILE="$BUILD_DIR/pq-tls-server.conf"
+if [ ! -f "$CONFIG_FILE" ]; then
+    cat > "$CONFIG_FILE" << CONFEOF
+[listen]
+port = 8443
+
+[mgmt]
+enabled = true
+CONFEOF
+fi
+
 OPENSSL_MODULES="$PROJECT/vendor/oqs-provider/build/lib" \
 LD_LIBRARY_PATH="$PROJECT/vendor/liboqs/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 "$BUILD_DIR/build/bin/pq-tls-server" \
+    --config "$CONFIG_FILE" \
     --cert "$CERT_DIR/server-cert.pem" \
     --key  "$CERT_DIR/server-key.pem" \
     --backend 127.0.0.1:8080 \
