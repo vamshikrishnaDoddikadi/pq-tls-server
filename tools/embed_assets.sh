@@ -48,7 +48,19 @@ while IFS= read -r -d '' file; do
     echo "/* $rel_path */" >> "$OUTPUT_C"
     echo "static const unsigned char ${var_name}[] = {" >> "$OUTPUT_C"
 
-    xxd -i < "$file" >> "$OUTPUT_C"
+    if command -v xxd >/dev/null 2>&1; then
+        xxd -i < "$file" >> "$OUTPUT_C"
+    else
+        python3 -c "
+import sys
+data = open(sys.argv[1], 'rb').read()
+for i, b in enumerate(data):
+    if i > 0: sys.stdout.write(',')
+    if i % 12 == 0: sys.stdout.write('\n  ')
+    sys.stdout.write(' 0x%02x' % b)
+sys.stdout.write('\n')
+" "$file" >> "$OUTPUT_C"
+    fi
 
     echo "};" >> "$OUTPUT_C"
     file_size=$(wc -c < "$file" | tr -d ' ')

@@ -22,7 +22,7 @@
 
 extern char **environ;
 
-#define PQ_TLS_SERVER_VERSION "1.0.0"
+#define PQ_TLS_SERVER_VERSION "2.0.0"
 
 static pq_conn_manager_t *g_manager = NULL;
 
