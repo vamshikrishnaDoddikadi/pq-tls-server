@@ -430,25 +430,31 @@ int pq_hpke_keygen(pq_hpke_t *hpke, uint8_t *pk, size_t pk_len,
             ret = mlkem768_keygen(pk, sk);
             break;
             
-        case HPKE_KEM_X25519_MLKEM768_CONCAT:
+        case HPKE_KEM_X25519_MLKEM768_CONCAT: {
             /* Generate X25519 key pair (first part) */
             ret = x25519_keygen(pk, sk);
             if (ret != PQ_SUCCESS) {
+                /* Cleanse X25519 keys on failure before returning */
+                OPENSSL_cleanse(pk, HPKE_X25519_PUBLICKEY_BYTES);
+                OPENSSL_cleanse(sk, HPKE_X25519_SECRETKEY_BYTES);
                 return ret;
             }
-            
+
             /* Generate ML-KEM-768 key pair (second part) */
             ret = mlkem768_keygen(
                 pk + HPKE_X25519_PUBLICKEY_BYTES,
                 sk + HPKE_X25519_SECRETKEY_BYTES
             );
             if (ret != PQ_SUCCESS) {
-                /* Clear X25519 keys on failure */
+                /* SECURITY: Cleanse BOTH X25519 and ML-KEM portions on failure */
                 OPENSSL_cleanse(pk, HPKE_X25519_PUBLICKEY_BYTES);
                 OPENSSL_cleanse(sk, HPKE_X25519_SECRETKEY_BYTES);
+                OPENSSL_cleanse(pk + HPKE_X25519_PUBLICKEY_BYTES, HPKE_MLKEM768_PUBLICKEY_BYTES);
+                OPENSSL_cleanse(sk + HPKE_X25519_SECRETKEY_BYTES, HPKE_MLKEM768_SECRETKEY_BYTES);
                 return ret;
             }
             break;
+        }
             
         default:
             return PQ_ERR_INVALID_ALGORITHM;

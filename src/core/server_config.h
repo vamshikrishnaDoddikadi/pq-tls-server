@@ -95,6 +95,7 @@ typedef struct {
     char      mgmt_admin_pass_hash[128];     /* PBKDF2 hash                      */
     char      cert_store_path[PQ_MAX_PATH];  /* Certificate store directory       */
     int       mgmt_enabled;                  /* Management UI on/off              */
+    int       mgmt_localhost_only;           /* Bind mgmt UI to 127.0.0.1 only    */
 
     /* --- Misc --- */
     int       verbose;

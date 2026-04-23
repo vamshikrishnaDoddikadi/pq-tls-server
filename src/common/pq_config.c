@@ -541,21 +541,22 @@ int pq_config_save(const pq_config_t *config, const char *filename) {
 }
 
 const char* pq_config_to_string(const pq_config_t *config) {
-    static char buffer[2048];
-    
+    /* SECURITY: Use thread-local storage to prevent race conditions with concurrent calls */
+    static __thread char thread_buffer[2048] = {0};
+
     if (!config) {
         return NULL;
     }
-    
-    char *p = buffer;
-    size_t remaining = sizeof(buffer);
+
+    char *p = thread_buffer;
+    size_t remaining = sizeof(thread_buffer);
     int written;
 
 /* Helper macro to safely advance the buffer pointer */
 #define SAFE_ADVANCE() do { \
     if (written < 0 || (size_t)written >= remaining) { \
-        buffer[sizeof(buffer) - 1] = '\0'; \
-        return buffer; \
+        thread_buffer[sizeof(thread_buffer) - 1] = '\0'; \
+        return thread_buffer; \
     } \
     p += written; remaining -= (size_t)written; \
 } while(0)
@@ -701,5 +702,7 @@ const char* pq_config_to_string(const pq_config_t *config) {
     SAFE_ADVANCE();
 
 #undef SAFE_ADVANCE
-    return buffer;
+    /* Ensure null termination */
+    thread_buffer[sizeof(thread_buffer) - 1] = '\0';
+    return thread_buffer;
 }

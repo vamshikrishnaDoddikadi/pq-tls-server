@@ -356,30 +356,41 @@ static int create_listen_socket(const pq_server_config_t *cfg) {
 /**
  * Weighted round-robin upstream selection.
  * Skips backends marked unhealthy by the health-check thread.
+ * SECURITY: Protected by mutex to ensure atomic weight calculation + selection.
  */
 static int pick_upstream(pq_conn_manager_t *mgr) {
     static atomic_int rr_counter = 0;
+    static pthread_mutex_t pick_mutex = PTHREAD_MUTEX_INITIALIZER;
     int n = mgr->config->upstream_count;
     if (n <= 0) return -1; /* No upstreams — caller must handle */
 
-    int total_weight = 0;
+    int selection_idx = 0;
+    int total_weight;
+
+    pthread_mutex_lock(&pick_mutex);
+    total_weight = 0;
     for (int i = 0; i < n; i++) {
         if (atomic_load(&mgr->upstream_healthy[i]))
             total_weight += mgr->config->upstreams[i].weight;
     }
     if (total_weight == 0) {
         /* All unhealthy — fall back to simple round-robin */
-        return atomic_fetch_add(&rr_counter, 1) % n;
+        selection_idx = (int)(atomic_fetch_add(&rr_counter, 1) % n);
+    } else {
+        int target = (int)(atomic_fetch_add(&rr_counter, 1) % total_weight);
+        int cumulative = 0;
+        for (int i = 0; i < n; i++) {
+            if (!atomic_load(&mgr->upstream_healthy[i])) continue;
+            cumulative += mgr->config->upstreams[i].weight;
+            if (target < cumulative) {
+                selection_idx = i;
+                break;
+            }
+        }
     }
+    pthread_mutex_unlock(&pick_mutex);
 
-    int target = atomic_fetch_add(&rr_counter, 1) % total_weight;
-    int cumulative = 0;
-    for (int i = 0; i < n; i++) {
-        if (!atomic_load(&mgr->upstream_healthy[i])) continue;
-        cumulative += mgr->config->upstreams[i].weight;
-        if (target < cumulative) return i;
-    }
-    return 0;
+    return selection_idx;
 }
 
 /**

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <pthread.h>
 
@@ -68,7 +69,16 @@ int pq_acl_add(const char *ip_or_cidr) {
         return -1;
     }
 
-    uint32_t mask = (prefix_len == 0) ? 0 : (~0U << (32 - prefix_len));
+    uint32_t mask;
+    /* SECURITY: Explicit mask calculation handles all prefix_len edge cases */
+    if (prefix_len == 0) {
+        mask = 0;
+    } else if (prefix_len == 32) {
+        mask = 0xFFFFFFFF;
+    } else {
+        /* Left shift of 32-bit value by (32 - prefix_len) where result is in [1,31] */
+        mask = 0xFFFFFFFFu << (32 - prefix_len);
+    }
     uint32_t network = ntohl(addr.s_addr) & mask;
 
     acl_entry_t *e = &acl.entries[acl.count++];

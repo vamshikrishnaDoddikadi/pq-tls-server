@@ -13,8 +13,16 @@ CFLAGS   := -std=c11 -Wall -Wextra -O2 -fPIC -fstack-protector-strong
 CFLAGS   += -D_GNU_SOURCE
 
 # Vendor paths (liboqs only — OpenSSL comes from system libssl-dev)
+# For local development, use symlinked vendor. For production, point to CI's vendor location.
 OQS_INC     := $(PROJ)/vendor/liboqs/include
 OQS_LIB     := $(PROJ)/vendor/liboqs/lib
+ifneq ($(wildcard $(OQS_INC)/oqs/oqs.h),)
+  # Vendor exists
+else
+  # Fall back to main project vendor
+  OQS_INC     := /media/vamshi/SYSTEM/Work-pc-desktop/pq-tls-server/vendor/liboqs/include
+  OQS_LIB     := /media/vamshi/SYSTEM/Work-pc-desktop/pq-tls-server/vendor/liboqs/lib
+endif
 
 INCLUDES := -I$(PROJ)/src/common \
             -I$(PROJ)/src/core \

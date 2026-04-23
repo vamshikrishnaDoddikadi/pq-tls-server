@@ -160,7 +160,9 @@ pq_server_t* pq_server_create(const char *cert_file, const char *key_file,
         const char *mod = getenv("OPENSSL_MODULES");
         fprintf(stderr, "  OPENSSL_MODULES=%s\n", mod ? mod : "(not set)");
         fprintf(stderr, "  Hint: ensure oqsprovider.so is in OPENSSL_MODULES directory\n");
+        /* SECURITY: Always unload BOTH providers to prevent leaks */
         if (server->default_provider) OSSL_PROVIDER_unload(server->default_provider);
+        if (server->oqs_provider) OSSL_PROVIDER_unload(server->oqs_provider);
         if (server->log_file) fclose(server->log_file);
         free(server->ca_file);
         free(server);

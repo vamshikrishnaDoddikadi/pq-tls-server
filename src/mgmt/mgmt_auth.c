@@ -38,9 +38,23 @@ static void hex_encode(const unsigned char *in, size_t in_len, char *out) {
 }
 
 static int hex_decode(const char *in, unsigned char *out, size_t out_max) {
-    size_t in_len = strlen(in);
-    if (in_len % 2 != 0 || in_len / 2 > out_max) return -1;
+    /* SECURITY: Validate input parameters and hex character format explicitly */
+    if (!in || !out || out_max == 0) return -1;
 
+    size_t in_len = strlen(in);
+    if (in_len == 0 || in_len % 2 != 0 || in_len / 2 > out_max) return -1;
+
+    /* Validate each character is valid hex before attempting decode */
+    for (size_t i = 0; i < in_len; i++) {
+        char c = in[i];
+        if (!((c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) {
+            return -1;
+        }
+    }
+
+    /* Decode hex string to bytes */
     for (size_t i = 0; i < in_len / 2; i++) {
         unsigned int byte;
         if (sscanf(in + i * 2, "%2x", &byte) != 1) return -1;

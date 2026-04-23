@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <errno.h>
 
 /* ======================================================================== */
 /* Helpers                                                                  */
@@ -119,7 +120,8 @@ void pq_server_config_defaults(pq_server_config_t *cfg) {
 int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp) {
-        fprintf(stderr, "config: cannot open '%s': %m\n", path);
+        /* SECURITY: Use strerror(errno) for portable error messages (%m is glibc-specific) */
+        fprintf(stderr, "config: cannot open '%s': %s\n", path, strerror(errno));
         return -1;
     }
 
@@ -244,6 +246,8 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
                 safe_copy(cfg->cert_store_path, val, sizeof(cfg->cert_store_path));
             else if (strcmp(key, "enabled") == 0)
                 cfg->mgmt_enabled = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+            else if (strcmp(key, "localhost_only") == 0)
+                cfg->mgmt_localhost_only = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         }
     }
 

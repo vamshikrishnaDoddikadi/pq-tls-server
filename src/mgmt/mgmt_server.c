@@ -35,6 +35,9 @@ static pq_server_config_t *g_config = NULL;
 static int g_port = 0;
 static char g_config_path[2048] = {0};
 
+/* Maximum request body size (1MB) - prevents memory exhaustion */
+#define MAX_REQUEST_BODY_SIZE 1048576
+
 /* ======================================================================== */
 /* HTTP Response Helpers                                                    */
 /* ======================================================================== */
@@ -168,21 +171,8 @@ static void extract_auth_token(const char *req, const char *path,
         }
     }
 
-    /* Check query string ?token=<token> (for EventSource SSE connections) */
-    if (path) {
-        const char *q = strchr(path, '?');
-        if (q) {
-            const char *tp = strstr(q, "token=");
-            if (tp) {
-                tp += 6;
-                size_t i = 0;
-                while (*tp && *tp != '&' && *tp != ' ' && i < token_size - 1) {
-                    token_out[i++] = *tp++;
-                }
-                token_out[i] = '\0';
-            }
-        }
-    }
+    /* SECURITY: Removed query string token support - tokens in URLs leak in logs/browser history.
+     * Clients must use Authorization: Bearer header or Cookie: mgmt_token=<token> instead. */
 }
 
 static void extract_body(const char *req, ssize_t total_len,
@@ -220,10 +210,27 @@ static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *c
         const char *cl = strstr(req, "Content-Length:");
         if (!cl) cl = strstr(req, "content-length:");
         if (cl) {
-            int content_len = atoi(cl + 15);
+            /* SECURITY: Use strtol for safe integer parsing instead of atoi */
+            char *endptr = NULL;
+            long content_len = strtol(cl + 15, &endptr, 10);
+            /* Validate: must have consumed digits, no invalid chars, positive value */
+            if (endptr == NULL || endptr == cl + 15 || *endptr == '\0' ||
+                *endptr == ' ' || content_len < 0 || content_len > MAX_REQUEST_BODY_SIZE) {
+                const char *err_msg = "{\"error\":\"Invalid Content-Length\"}";
+                send_response(fd, "400 Bad Request", "application/json", err_msg, strlen(err_msg));
+                close(fd);
+                return;
+            }
             size_t body_start = (size_t)(hdr_end + 4 - req);
             size_t body_have = (size_t)total - body_start;
-            if ((int)body_have >= content_len) break;
+            /* SECURITY: Reject if Content-Length exceeds our buffer capacity */
+            if ((size_t)content_len > sizeof(req) - body_start - 1) {
+                const char *err_msg = "{\"error\":\"Request body too large\"}";
+                send_response(fd, "413 Payload Too Large", "application/json", err_msg, strlen(err_msg));
+                close(fd);
+                return;
+            }
+            if ((size_t)body_have >= (size_t)content_len) break;
             continue;
         }
         break;  /* No Content-Length → assume complete */
@@ -354,9 +361,14 @@ static void* mgmt_thread_fn(void *arg) {
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port        = htons((uint16_t)g_port);
+    addr.sin_family = AF_INET;
+    /* SECURITY: Respect mgmt_localhost_only config - bind to 127.0.0.1 if enabled */
+    if (g_config && g_config->mgmt_localhost_only) {
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    } else {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+    addr.sin_port = htons((uint16_t)g_port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
         listen(fd, 32) < 0) {

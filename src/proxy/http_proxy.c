@@ -19,6 +19,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <sys/uio.h>
+#include <syslog.h>
 
 #define PROXY_BUF_SIZE  65536  /* Increased for efficient TLS record batching (16KB records + overhead) */
 
@@ -50,14 +51,21 @@ int pq_proxy_connect_upstream(const char *host, uint16_t port, int timeout_ms) {
 
     int gai = getaddrinfo(host, port_str, &hints, &res);
     if (gai != 0) {
-        fprintf(stderr, "proxy: getaddrinfo(%s): %s\n", host, gai_strerror(gai));
+        /* SECURITY: Log upstream connection failures for debugging */
+        syslog(LOG_ERR, "proxy: getaddrinfo(%s:%s) failed: %s", host, port_str, gai_strerror(gai));
+        fprintf(stderr, "proxy: getaddrinfo(%s:%s) failed: %s\n", host, port_str, gai_strerror(gai));
         return -1;
     }
 
     int fd = -1;
+    int last_err = 0;
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            last_err = errno;
+            syslog(LOG_WARNING, "proxy: socket() for %s failed: %s", host, strerror(errno));
+            continue;
+        }
 
         /* Non-blocking connect with timeout */
         set_nonblocking(fd);
@@ -68,6 +76,8 @@ int pq_proxy_connect_upstream(const char *host, uint16_t port, int timeout_ms) {
             break;
         }
         if (errno != EINPROGRESS) {
+            last_err = errno;
+            syslog(LOG_WARNING, "proxy: connect() to %s:%s failed: %s", host, port_str, strerror(errno));
             close(fd); fd = -1;
             continue;
         }
@@ -76,6 +86,8 @@ int pq_proxy_connect_upstream(const char *host, uint16_t port, int timeout_ms) {
         struct pollfd pfd = { .fd = fd, .events = POLLOUT };
         ret = poll(&pfd, 1, timeout_ms);
         if (ret <= 0) {
+            last_err = (ret == 0) ? ETIMEDOUT : errno;
+            syslog(LOG_WARNING, "proxy: poll() timeout connecting to %s:%s", host, port_str);
             close(fd); fd = -1;
             continue;
         }
@@ -85,6 +97,8 @@ int pq_proxy_connect_upstream(const char *host, uint16_t port, int timeout_ms) {
         socklen_t elen = sizeof(err);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
         if (err != 0) {
+            last_err = err;
+            syslog(LOG_WARNING, "proxy: SO_ERROR=%d connecting to %s:%s: %s", err, host, port_str, strerror(err));
             close(fd); fd = -1;
             continue;
         }
@@ -98,6 +112,10 @@ int pq_proxy_connect_upstream(const char *host, uint16_t port, int timeout_ms) {
     if (fd >= 0) {
         int opt = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+    } else {
+        /* SECURITY: Log when all connection attempts fail */
+        syslog(LOG_ERR, "proxy: all connect attempts to %s:%s failed (last error: %s)",
+               host, port_str, strerror(last_err));
     }
 
     return fd;
