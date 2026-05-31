@@ -53,8 +53,8 @@ vendor/
 # Vendored Chart.js (downloaded, not committed — use placeholder or download)
 src/mgmt/static/vendor/chart.min.js
 
-# Stale nested project copy
-pq-tls-server/
+# Stale nested project copy (exact match for root directory only)
+/pq-tls-server/
 
 # Production release output
 PROD_RELEASE/

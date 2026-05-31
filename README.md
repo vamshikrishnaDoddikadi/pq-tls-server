@@ -2,8 +2,15 @@
 
 [![CI](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/actions/workflows/ci.yml/badge.svg)](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CLA Assistant](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/actions/workflows/cla.yml/badge.svg)](.github/workflows/cla.yml)
+[![Docker](https://img.shields.io/docker/pulls/vamshikrishna/pq-tls-server?label=Docker%20Pulls)]()
 [![TLS 1.3](https://img.shields.io/badge/TLS-1.3-green.svg)]()
 [![Post-Quantum](https://img.shields.io/badge/Post--Quantum-ML--KEM--768-purple.svg)]()
+[![C](https://img.shields.io/badge/language-C-blue.svg)]()
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
+
+
 
 **Post-Quantum TLS Termination Reverse Proxy**
 
@@ -432,6 +439,32 @@ Available metrics: `pqtls_connections_total`, `pqtls_connections_active`, `pqtls
 Quantum computers capable of breaking RSA and ECC are expected within the next 10-20 years. The "harvest now, decrypt later" threat means adversaries can record today's encrypted traffic and decrypt it once quantum computers arrive. PQ-TLS Server protects against this by using ML-KEM-768 (standardized as FIPS 203), a lattice-based key encapsulation mechanism that is resistant to both classical and quantum attacks.
 
 The hybrid approach (X25519 + ML-KEM-768) ensures that even if ML-KEM is somehow broken, the classical X25519 component still provides security. You get the best of both worlds.
+
+## Community & Governance
+
+| Resource | Link |
+|----------|------|
+| **Contributing** | [CONTRIBUTING.md](CONTRIBUTING.md) — how to get started |
+| **Code of Conduct** | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards |
+| **Security Policy** | [SECURITY.md](SECURITY.md) — vulnerability disclosure |
+| **Contributor License** | [CLA.md](CLA.md) — required for code contributions |
+| **Issues** | [GitHub Issues](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/issues) — bugs & feature requests |
+| **Discussion** | [GitHub Discussions](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/discussions) — questions & ideas |
+| **Changelog** | [CHANGELOG.md](CHANGELOG.md) — release history |
+
+### Governance Model
+
+PQ-TLS Server uses a **benevolent-dictator-for-life (BDFL)** governance model with maintainers for each subsystem. The project is maintained by:
+
+- **Vamshi Krishna Doddikadi** — Project lead, architecture, core crypto
+
+### Versioning
+
+This project follows [Semantic Versioning 2.0.0](https://semver.org/). Breaking changes to public API increment the major version. The current release is **v2.2.0**.
+
+### Roadmap
+
+See [CHANGELOG.md](CHANGELOG.md) for what's shipped and [GitHub Projects](https://github.com/vamshikrishnaDoddikadi/pq-tls-server/projects) for upcoming work.
 
 ## License
 

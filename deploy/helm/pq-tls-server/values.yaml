@@ -1,0 +1,186 @@
+# pq-tls-server
+# Default values for the PQ-TLS Server Helm chart.
+# This is a YAML-formatted file.
+
+# Number of PQ-TLS Server replicas
+replicaCount: 1
+
+# Docker image configuration
+image:
+  repository: vamshikrishna/pq-tls-server
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+# Pull secrets for the Docker image
+imagePullSecrets: []
+
+# Overrides the default Helm-generated name
+nameOverride: ""
+fullnameOverride: ""
+
+# ServiceAccount configuration
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+# Pod-level annotations
+podAnnotations: {}
+
+# Pod-level labels
+podLabels: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+# Service configuration
+service:
+  type: ClusterIP
+  # TLS proxy port
+  tlsPort: 8443
+  # Management dashboard + metrics port
+  mgmtPort: 9090
+  # Annotations for the TLS service
+  tlsAnnotations: {}
+  # Annotations for the management service
+  mgmtAnnotations: {}
+
+# Ingress configuration for the management dashboard
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 2
+    memory: 512Mi
+  requests:
+    cpu: 500m
+    memory: 256Mi
+
+# Liveness and readiness probe configuration
+livenessProbe:
+  httpGet:
+    path: /health
+    port: mgmt
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: mgmt
+  initialDelaySeconds: 5
+  periodSeconds: 15
+
+# Horizontal Pod Autoscaler configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Volumes
+volumes: []
+
+# Volume mounts
+volumeMounts: []
+
+# --- PQ-TLS Server Configuration ---
+
+# TLS certificate and key
+# If not set, the chart generates a self-signed certificate on first startup
+tls:
+  # PEM-encoded certificate
+  cert: ""
+  # PEM-encoded private key
+  key: ""
+
+# Server configuration
+server:
+  # TLS listen port (internal, mapped via service)
+  port: 8443
+  # Management/metrics port
+  mgmtPort: 9090
+  # Worker threads (0 = auto-detect CPUs)
+  workers: 0
+  # Maximum concurrent connections
+  maxConnections: 1024
+
+# Backend servers to proxy traffic to
+backends: []
+# - address: "backend-service:8080"
+#   weight: 1
+
+# TLS key exchange groups
+groups: "X25519MLKEM768:X25519"
+
+# Rate limiting (0 = disabled)
+rateLimit:
+  perIp: 0
+  burst: 0
+
+# Access control lists
+acl:
+  mode: disabled
+  # entries: []
+  # - "10.0.0.0/8"
+  # - "192.168.1.0/24"
+
+# Logging
+logging:
+  level: info
+  json: false
+  accessLog: true
+
+# Environment variables for the container
+# OPENSSL_MODULES and LD_LIBRARY_PATH are set automatically
+extraEnv: []
+
+# Secret containing the TLS cert and key
+# Create with:
+#   kubectl create secret tls pq-tls-tls --cert=tls.crt --key=tls.key
+existingTlsSecret: ""
+
+# Prometheus ServiceMonitor configuration
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}

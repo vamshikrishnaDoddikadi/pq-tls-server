@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PQ-TLS Server — Post-Quantum TLS Termination</title>
+  <meta name="description" content="Post-Quantum TLS 1.3 Termination Reverse Proxy with ML-KEM-768 / Kyber. Drop-in quantum-resistant TLS for any HTTP service.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #050608;
+      --bg2: #0a0c0f;
+      --bg3: #111418;
+      --text: #c2c8cb;
+      --text-dim: #6b7280;
+      --accent: #38bdf8;
+      --accent2: #a78bfa;
+      --border: #1f2937;
+      --success: #34d399;
+      --font: 'Inter', -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      max-width: 1148px;
+      margin: 0 auto;
+    }
+    nav .logo {
+      font-weight: 700;
+      font-size: 1.2rem;
+      letter-spacing: -0.5px;
+    }
+    nav .logo span { color: var(--accent); }
+    nav .links a {
+      color: var(--text-dim);
+      text-decoration: none;
+      margin-left: 24px;
+      font-size: 0.9rem;
+      transition: color 0.2s;
+    }
+    nav .links a:hover { color: var(--text); }
+    nav .links .btn {
+      background: var(--accent);
+      color: var(--bg);
+      padding: 8px 20px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 100px 0 60px;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 3.2rem;
+      font-weight: 800;
+      letter-spacing: -1.5px;
+      line-height: 1.15;
+      max-width: 800px;
+      margin: 0 auto 20px;
+    }
+    .hero h1 .highlight { 
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      color: var(--text-dim);
+      font-size: 1.2rem;
+      max-width: 600px;
+      margin: 0 auto 40px;
+    }
+    .hero .cta-group { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+    .hero .cta-primary {
+      background: var(--accent);
+      color: var(--bg);
+      padding: 14px 32px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      transition: opacity 0.2s;
+    }
+    .hero .cta-primary:hover { opacity: 0.9; }
+    .hero .cta-secondary {
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 14px 32px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: border-color 0.2s;
+    }
+    .hero .cta-secondary:hover { border-color: var(--text-dim); }
+    .hero .badge-group {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 32px;
+      flex-wrap: wrap;
+    }
+    .hero .badge-group img { height: 22px; }
+
+    /* Features */
+    .features {
+      padding: 80px 0;
+      border-top: 1px solid var(--border);
+    }
+    .features h2 {
+      text-align: center;
+      font-size: 1.8rem;
+      margin-bottom: 60px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+    }
+    .card .icon { font-size: 1.8rem; margin-bottom: 16px; }
+    .card h3 { font-size: 1.1rem; margin-bottom: 10px; }
+    .card p { color: var(--text-dim); font-size: 0.9rem; line-height: 1.6; }
+
+    /* Code Demo */
+    .demo {
+      padding: 80px 0;
+      border-top: 1px solid var(--border);
+    }
+    .demo h2 { text-align: center; font-size: 1.8rem; margin-bottom: 40px; }
+    .code-block {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      line-height: 1.7;
+      overflow-x: auto;
+    }
+    .code-block .comment { color: #6b7280; }
+    .code-block .keyword { color: var(--accent); }
+    .code-block .string { color: var(--success); }
+
+    /* Pricing */
+    .pricing {
+      padding: 80px 0;
+      border-top: 1px solid var(--border);
+    }
+    .pricing h2 { text-align: center; font-size: 1.8rem; margin-bottom: 10px; }
+    .pricing .subtitle {
+      text-align: center;
+      color: var(--text-dim);
+      margin-bottom: 50px;
+    }
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 20px;
+    }
+    .pricing-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      text-align: center;
+    }
+    .pricing-card.featured {
+      border-color: var(--accent);
+      position: relative;
+    }
+    .pricing-card.featured::before {
+      content: 'Popular';
+      position: absolute;
+      top: -12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--accent);
+      color: var(--bg);
+      padding: 4px 16px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .pricing-card .tier { color: var(--text-dim); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
+    .pricing-card .price { font-size: 2.5rem; font-weight: 800; margin: 12px 0 4px; }
+    .pricing-card .price span { font-size: 1rem; font-weight: 400; color: var(--text-dim); }
+    .pricing-card .desc { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 24px; }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+
+    @media (max-width: 768px) {
+      .hero h1 { font-size: 2.2rem; }
+      nav .links a { margin-left: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="logo"><span>PQ</span>-TLS Server</div>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server" target="_blank">GitHub</a>
+      <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server/blob/main/INSTALL.md" target="_blank">Docs</a>
+      <a href="#pricing" class="btn">Enterprise</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <h1>
+        Post-Quantum TLS for<br>
+        <span class="highlight">Every Deployment</span>
+      </h1>
+      <p>A single-binary TLS termination proxy with NIST-standard ML-KEM-768 key exchange. Drop-in quantum resistance for any HTTP service.</p>
+      <div class="cta-group">
+        <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server" class="cta-primary">GitHub →</a>
+        <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server/blob/main/INSTALL.md" class="cta-secondary">Install Guide</a>
+      </div>
+      <div class="badge-group">
+        <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT">
+        <img src="https://img.shields.io/badge/TLS-1.3-green.svg" alt="TLS 1.3">
+        <img src="https://img.shields.io/badge/Post--Quantum-ML--KEM--768-purple.svg" alt="ML-KEM-768">
+        <img src="https://img.shields.io/badge/language-C-blue.svg" alt="C">
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="container">
+      <h2>Built for Production</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">🔐</div>
+          <h3>ML-KEM-768 (FIPS 203)</h3>
+          <p>NIST-standard post-quantum key exchange in hybrid mode with X25519. Clients without PQ support fall back to classical X25519.</p>
+        </div>
+        <div class="card">
+          <div class="icon">⚡</div>
+          <h3>Single Binary</h3>
+          <p>Zero runtime dependencies beyond OpenSSL + liboqs. Everything embedded — management UI, certificates, configuration.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🔄</div>
+          <h3>Crypto-Agility</h3>
+          <p>Pluggable provider registry. Swap algorithms, add new KEMs, and update policies at runtime — no recompilation needed.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📊</div>
+          <h3>Management Dashboard</h3>
+          <p>Real-time HUD with connection throughput, PQ adoption ratio, live log viewer, certificate management, and more.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🛡️</div>
+          <h3>Security Built In</h3>
+          <p>Per-IP rate limiting, CIDR-based ACLs, hot certificate reload, structured JSON logging. Runs as non-root user.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📈</div>
+          <h3>Prometheus Metrics</h3>
+          <p>Full metrics endpoint for Grafana dashboards. Track connection counts, handshake failures, PQ vs classical ratios.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="demo">
+    <div class="container">
+      <h2>Get Started in 60 Seconds</h2>
+      <div class="code-block">
+        <span class="comment"># Run PQ-TLS Server with Docker</span><br>
+        docker run -d \ <br>
+        &nbsp;&nbsp;-p 8443:8443 -p 9090:9090 \ <br>
+        &nbsp;&nbsp;-v ./certs:/etc/pq-tls-server/certs:ro \ <br>
+        &nbsp;&nbsp;vamshikrishna/pq-tls-server \ <br>
+        &nbsp;&nbsp;--backend your-app:8080 --health-port 9090<br><br>
+        <span class="comment"># Test with curl</span><br>
+        curl --cacert certs/ca.crt https://localhost:8443/ <br><br>
+        <span class="comment"># Open dashboard at http://localhost:9090</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="pricing" id="pricing">
+    <div class="container">
+      <h2>Pricing</h2>
+      <p class="subtitle">Open-source core. Premium enterprise features for production deployments.</p>
+      <div class="pricing-grid">
+        <div class="pricing-card">
+          <div class="tier">Community</div>
+          <div class="price">$0 <span>/ forever</span></div>
+          <p class="desc">Core PQ-TLS engine, CLI, single backend, Prometheus metrics</p>
+        </div>
+        <div class="pricing-card featured">
+          <div class="tier">Professional</div>
+          <div class="price">$1,200 <span>/year</span></div>
+          <p class="desc">Multi-backend LB, ACLs, rate limiting, REST API, email support</p>
+        </div>
+        <div class="pricing-card">
+          <div class="tier">Business</div>
+          <div class="price">$4,800 <span>/year</span></div>
+          <p class="desc">SSO (OIDC/SAML), RBAC, audit logging, compliance dashboards</p>
+        </div>
+        <div class="pricing-card">
+          <div class="tier">Enterprise</div>
+          <div class="price">$12k+ <span>/year</span></div>
+          <p class="desc">Clustering, FIPS module, K8s operator, SLA, 24/7 support</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>MIT Licensed · <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server">GitHub</a> · Built by Vamshi Krishna</p>
+    </div>
+  </footer>
+</body>
+</html>
