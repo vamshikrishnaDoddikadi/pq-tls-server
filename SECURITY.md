@@ -9,7 +9,7 @@ PQ-TLS Server provides cryptographic security for TLS connections using post-qua
 Please report vulnerabilities via one of these channels:
 
 1. **GitHub Private Vulnerability Reporting** — Use the "Report a vulnerability" button on the repository's Security tab
-2. **Email** — vamshikrishna.doddikadi@example.com (replace with your actual email)
+2. **Email** — doddikadivamshikrishna@gmail.com
 
 You should receive a response within 48 hours. If you don't, follow up.
 
