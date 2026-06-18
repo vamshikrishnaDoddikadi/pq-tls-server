@@ -53,6 +53,10 @@ Clients connect with TLS 1.3 using hybrid post-quantum key exchange (X25519MLKEM
 ## Quick Start
 
 ```bash
+# 0. Set OQS provider path (required for post-quantum key exchange)
+export OPENSSL_MODULES=/usr/local/lib/ossl-modules  # or path to oqsprovider.so
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
 # 1. Generate test certificates
 ./scripts/gen-certs.sh
 
@@ -61,16 +65,22 @@ python3 -m http.server 8080 &
 
 # 3. Run PQ-TLS Server with dashboard
 ./build/bin/pq-tls-server \
-    --cert certs/server.crt \
-    --key certs/server.key \
-    --backend 127.0.0.1:8080 \
-    --health-port 9090
+    -c certs/server.crt \
+    -k certs/server.key \
+    -b 127.0.0.1:8080 \
+    -H 9090 \
+    -g X25519MLKEM768:X25519
 
 # 4. Open dashboard at http://localhost:9090
 
-# 5. Test with curl
-curl --cacert certs/ca.crt https://localhost:8443/
+# 5. Verify PQ key exchange
+curl -skv https://localhost:8443/ 2>&1 | grep "SSL connection"
+# Expected: TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768
 ```
+
+> **OQS Provider:** The server auto-loads `oqsprovider.so` via OpenSSL 3's provider API.
+> Ensure `OPENSSL_MODULES` points to the directory containing `oqsprovider.so`.
+> Without it, the server falls back to classical key exchange (ECDH).
 
 ## Building
 

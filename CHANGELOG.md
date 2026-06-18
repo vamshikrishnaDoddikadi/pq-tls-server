@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-06-18
+
+### Security
+- **Comprehensive security hardening** — 37 findings resolved (2 Critical, 11 High, 13 Medium, 11 Low)
+  - Per-IP rate limiter with escalating lockout (5 failures -> 5s, 10 failures -> 900s) on management login
+  - --require-pq (-Q) flag for fail-closed enforcement — server exits if OQS provider cannot load
+  - Removed hardcoded key passphrase — now requires PQ_KEY_PASSPHRASE environment variable
+  - All 24 atoi() calls replaced with validated strtol() across the codebase
+  - TOTP replay protection with 8-slot buffer, OPENSSL_cleanse() on secret memory
+  - Session cookie Secure flag, HttpOnly enforced
+  - Atomic open()+fdopen() for all file writes (cert_manager, config_writer) — eliminates TOCTOU races
+  - Path traversal validation + length limits on certificate names
+  - Audit logging: LOGIN_SUCCESS, LOGIN_FAIL, LOGIN_BLOCKED, TOTP_FAIL to stderr
+  - Full vulnerability assessment report available in VULNERABILITY-REPORT.md
+
+### Fixed
+- **OQS Provider loading** — server now auto-detects and loads oqsprovider.so when OPENSSL_MODULES is set
+  - Removed stale oqs_tls_integration.c dead path — provider now loaded via OpenSSL 3 provider API
+  - Hybrid key exchange groups (X25519MLKEM768, X25519MLKEM512, X25519MLKEM1024) validated against loaded provider capabilities
+  - oqs_available status correctly reported in dashboard /api/mgmt/status and HUD status bar
+
+### Changed
+- OQS Provider compatibility: tested with liboqs 0.11.0 + oqsprovider 0.11.0
+- Dashboard static asset embedding rebuilt for SPA fallback routing
+- VPS deployment validated with full PQ-TLS traffic test (7/7 connections = 100% PQ negotiations)
+
+
 ## [2.2.0] - 2026-03-29
 
 ### Added

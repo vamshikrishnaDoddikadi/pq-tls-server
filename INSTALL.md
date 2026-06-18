@@ -1,6 +1,6 @@
 # PQ-TLS Server — Installation & Usage Guide
 
-[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.2.1-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Post-Quantum](https://img.shields.io/badge/Post--Quantum-ML--KEM--768-purple.svg)]()
 
@@ -130,7 +130,7 @@ Verify: `ls vendor/liboqs/include/oqs/oqs.h` should exist.
 #### Step 3: Build oqs-provider
 
 ```bash
-git clone --depth 1 --branch 0.7.0 https://github.com/open-quantum-safe/oqs-provider.git /tmp/oqs-provider
+git clone --depth 1 --branch 0.11.0 https://github.com/open-quantum-safe/oqs-provider.git /tmp/oqs-provider
 cd /tmp/oqs-provider && mkdir build && cd build
 
 cmake -GNinja \
@@ -163,6 +163,34 @@ cmake -DCMAKE_BUILD_TYPE=Release \
     ..
 make -j$(nproc)
 ```
+
+
+### Runtime OQS Configuration
+
+The server loads the OQS provider at startup via OpenSSL 3 provider API. Set these
+environment variables before launching:
+
+```bash
+export OPENSSL_MODULES=/path/to/pq-tls-server/vendor/oqs-provider/build/lib
+export LD_LIBRARY_PATH=/path/to/pq-tls-server/vendor/liboqs/lib:$LD_LIBRARY_PATH
+
+./build/bin/pq-tls-server -c cert.pem -k key.pem -b 127.0.0.1:8080 -H 9090 -g X25519MLKEM768:X25519
+```
+
+**Verification:**
+
+```bash
+openssl list -provider oqsprovider -providers 2>&1 | grep oqsprovider
+
+curl -skv https://localhost:8443/ 2>&1 | grep "SSL connection"
+# Expected: TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768
+
+curl -s http://localhost:9090/api/stats | jq .pq_negotiations
+```
+
+> **Troubleshooting OQS Inactive:** Verify OPENSSL_MODULES is set, oqsprovider.so is present,
+> and `ldd $OPENSSL_MODULES/oqsprovider.so` shows no missing libraries.
+
 
 The binary is at `build/bin/pq-tls-server`.
 
