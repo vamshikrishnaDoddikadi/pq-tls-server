@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PQ-TLS Server — Command Center</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/main.css">
     <link rel="stylesheet" href="css/charts.css">
     <link rel="stylesheet" href="css/wizard.css">
@@ -26,8 +26,8 @@
     <!-- Restart banner -->
     <div id="restartBanner" class="restart-banner" style="display:none">
         <span>Configuration changes require a server restart to take effect.</span>
-        <button onclick="PQ.restartServer()">Restart Now</button>
-        <button class="dismiss" onclick="this.parentElement.style.display='none'">Dismiss</button>
+        <button class="btn btn-sm" onclick="PQ.restartServer()">Restart Now</button>
+        <button class="btn btn-ghost btn-sm" onclick="this.parentElement.style.display='none'">Dismiss</button>
     </div>
 
     <!-- Main layout -->
@@ -41,25 +41,25 @@
 
             <div class="nav-links">
                 <a href="#/dashboard" class="nav-link" data-page="dashboard">
-                    <span class="nav-icon">[&gt;]</span> DASHBOARD
+                    <span class="nav-icon">▸</span> Dashboard
                 </a>
                 <a href="#/tls" class="nav-link" data-page="tls">
-                    <span class="nav-icon">[&gt;]</span> TLS / SSL
+                    <span class="nav-icon">▸</span> TLS / SSL
                 </a>
                 <a href="#/upstreams" class="nav-link" data-page="upstreams">
-                    <span class="nav-icon">[&gt;]</span> UPSTREAMS
+                    <span class="nav-icon">▸</span> Upstreams
                 </a>
                 <a href="#/security" class="nav-link" data-page="security">
-                    <span class="nav-icon">[&gt;]</span> SECURITY
+                    <span class="nav-icon">▸</span> Security
                 </a>
                 <a href="#/settings" class="nav-link" data-page="settings">
-                    <span class="nav-icon">[&gt;]</span> SETTINGS
+                    <span class="nav-icon">▸</span> Settings
                 </a>
                 <a href="#/certificates" class="nav-link" data-page="certificates">
-                    <span class="nav-icon">[&gt;]</span> CERTIFICATES
+                    <span class="nav-icon">▸</span> Certificates
                 </a>
                 <a href="#/logs" class="nav-link" data-page="logs">
-                    <span class="nav-icon">[&gt;]</span> LOGS
+                    <span class="nav-icon">▸</span> Logs
                 </a>
             </div>
 
@@ -68,14 +68,14 @@
                     Architected by <a href="https://www.linkedin.com/in/vamshivivaan" target="_blank" rel="noopener">Vamshi Krishna</a>
                 </div>
                 <a href="#" class="nav-link" id="logoutBtn">
-                    <span class="nav-icon">[X]</span> LOGOUT
+                    <span class="nav-icon">✕</span> Logout
                 </a>
             </div>
         </nav>
 
         <!-- Content area -->
         <main class="content" id="pageContent">
-            <div class="loading">Loading...</div>
+            <div class="loading">Initializing&hellip;</div>
         </main>
     </div>
 
