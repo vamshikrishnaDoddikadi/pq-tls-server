@@ -141,6 +141,7 @@ static void* sse_thread_fn(void *arg) {
 
 static void extract_auth_token(const char *req, const char *path,
                                char *token_out, size_t token_size) {
+    (void)path;
     token_out[0] = '\0';
 
     /* Check Authorization: Bearer <token> header */
@@ -248,7 +249,7 @@ static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *c
 
     /* Strip query string from path for routing (keep full for param extraction) */
     char clean_path[2048];
-    strncpy(clean_path, path, sizeof(clean_path) - 1);
+    snprintf(clean_path, sizeof(clean_path), "%s", path);
     clean_path[sizeof(clean_path) - 1] = '\0';
     char *query = strchr(clean_path, '?');
     if (query) *query = '\0';
@@ -410,7 +411,7 @@ int pq_mgmt_start(pq_conn_manager_t *mgr, pq_server_config_t *config,
     g_config = config;
     g_port = port;
     if (config_path) {
-        strncpy(g_config_path, config_path, sizeof(g_config_path) - 1);
+        snprintf(g_config_path, sizeof(g_config_path), "%s", config_path);
     }
 
     atomic_store(&mgmt_running, 1);

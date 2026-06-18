@@ -9,9 +9,9 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
-
+#include <stdio.h>
 #define MAX_TRACKED_IPS 65536
-#define HASH_BUCKETS    4096
+#define HASH_BUCKETS    16384
 #define STALE_SECONDS   300  /* Remove IPs not seen for 5 minutes */
 
 typedef struct ip_entry {
@@ -57,6 +57,13 @@ __attribute__((hot))
 int pq_rate_limiter_allow(const char *ip) {
     if (__builtin_expect(!rl.initialized || !ip, 0)) return 1;
 
+    /* Periodic cleanup: every 1000 allow() checks, sweep stale entries */
+    static int cleanup_counter = 0;
+    if (__builtin_expect(++cleanup_counter >= 1000, 0)) {
+        cleanup_counter = 0;
+        pq_rate_limiter_cleanup();
+    }
+
     pthread_mutex_lock(&rl.mutex);
 
     unsigned int idx = hash_ip(ip);
@@ -73,7 +80,7 @@ int pq_rate_limiter_allow(const char *ip) {
     if (__builtin_expect(!entry, 0)) {
         entry = calloc(1, sizeof(*entry));
         if (__builtin_expect(!entry, 0)) { pthread_mutex_unlock(&rl.mutex); return 1; }
-        strncpy(entry->ip, ip, sizeof(entry->ip) - 1);
+        snprintf(entry->ip, sizeof(entry->ip), "%s", ip);
         entry->tokens = (double)rl.burst;
         entry->last_seen = now;
         entry->next = rl.buckets[idx];

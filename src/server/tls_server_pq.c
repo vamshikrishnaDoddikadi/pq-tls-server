@@ -73,13 +73,13 @@ static void setup_oqs_provider_path(void) {
 
     /* Binary is at <root>/build/bin/tls_server_pq => go up 3 levels */
     char exe_copy1[PATH_MAX], exe_copy2[PATH_MAX], exe_copy3[PATH_MAX];
-    strncpy(exe_copy1, exe_path, PATH_MAX - 1);
+    snprintf(exe_copy1, sizeof(exe_copy1), "%s", exe_path);
     exe_copy1[PATH_MAX - 1] = '\0';
     char *bin_dir = dirname(exe_copy1);       /* build/bin */
-    strncpy(exe_copy2, bin_dir, PATH_MAX - 1);
+    snprintf(exe_copy2, sizeof(exe_copy2), "%s", bin_dir);
     exe_copy2[PATH_MAX - 1] = '\0';
     char *build_dir = dirname(exe_copy2);     /* build */
-    strncpy(exe_copy3, build_dir, PATH_MAX - 1);
+    snprintf(exe_copy3, sizeof(exe_copy3), "%s", build_dir);
     exe_copy3[PATH_MAX - 1] = '\0';
     char *root = dirname(exe_copy3);          /* project root */
 

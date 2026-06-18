@@ -6,6 +6,7 @@
 #include "hpack.h"
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
 
 /* Static table from RFC 7541 Appendix A (first 61 entries) */
 typedef struct {
@@ -176,8 +177,8 @@ static int hpack_get_header(hpack_decoder_t *dec, uint32_t index,
 
     if (index <= HPACK_STATIC_TABLE_SIZE) {
         /* Static table entry */
-        strncpy(header->name, hpack_static_table[index - 1].name, sizeof(header->name) - 1);
-        strncpy(header->value, hpack_static_table[index - 1].value, sizeof(header->value) - 1);
+        snprintf(header->name, sizeof(header->name), "%s", hpack_static_table[index - 1].name);
+        snprintf(header->value, sizeof(header->value), "%s", hpack_static_table[index - 1].value);
         header->name[sizeof(header->name) - 1] = '\0';
         header->value[sizeof(header->value) - 1] = '\0';
         return 0;

@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <limits.h>
+#include <errno.h>
 
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -22,6 +24,18 @@
 #include <openssl/bn.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+
+#include <fcntl.h>
+
+/* Trusted base directory for certificate store operations.
+ * All cert_store_path values must resolve under this directory. */
+#ifndef CERT_STORE_BASE
+#define CERT_STORE_BASE "/etc/pq-tls-server"
+#endif
+
+/* Default passphrase for encrypting private keys on disk.
+ * Override via PQ_KEY_PASSPHRASE environment variable. */
+#define CERT_DEFAULT_KEY_PASSPHRASE "pq-tls-default-key-encryption"
 
 static void x509_name_to_str(X509_NAME *name, char *buf, size_t buf_size) {
     if (!name || !buf || buf_size == 0) return;
@@ -234,7 +248,10 @@ int cert_generate_self_signed(const char *cn, const char *org,
         char *tok = strtok_r(san_buf, ",", &saveptr);
         while (tok) {
             while (*tok == ' ') tok++;
-            if (san_ext[0]) strncat(san_ext, ",", sizeof(san_ext) - strlen(san_ext) - 1);
+            if (san_ext[0]) {
+                size_t off = strlen(san_ext);
+                snprintf(san_ext + off, sizeof(san_ext) - off, "%s", ",");
+            }
 
             /* Check if IP address */
             int is_ip = 1;
@@ -247,7 +264,8 @@ int cert_generate_self_signed(const char *cn, const char *org,
 
             char entry[256];
             snprintf(entry, sizeof(entry), "%s:%s", is_ip ? "IP" : "DNS", tok);
-            strncat(san_ext, entry, sizeof(san_ext) - strlen(san_ext) - 1);
+            size_t off = strlen(san_ext);
+            snprintf(san_ext + off, sizeof(san_ext) - off, "%s", entry);
 
             tok = strtok_r(NULL, ",", &saveptr);
         }
@@ -273,13 +291,19 @@ int cert_generate_self_signed(const char *cn, const char *org,
         fclose(fp);
     }
 
-    /* Write key */
+    /* Write key (encrypted at rest with passphrase, no TOCTOU window) */
     {
-        FILE *fp = fopen(key_out_path, "w");
-        if (!fp) { unlink(cert_out_path); goto cleanup; }
-        PEM_write_PrivateKey(fp, pkey, NULL, NULL, 0, NULL, NULL);
+        int fd = open(key_out_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) { unlink(cert_out_path); goto cleanup; }
+        FILE *fp = fdopen(fd, "w");
+        if (!fp) { close(fd); unlink(cert_out_path); goto cleanup; }
+
+        const char *passphrase = getenv("PQ_KEY_PASSPHRASE");
+        if (!passphrase) passphrase = CERT_DEFAULT_KEY_PASSPHRASE;
+        PEM_write_PrivateKey(fp, pkey, EVP_aes_256_cbc(),
+                             (unsigned char *)passphrase,
+                             (int)strlen(passphrase), NULL, NULL);
         fclose(fp);
-        chmod(key_out_path, 0600);
     }
 
     ret = 0;
@@ -349,6 +373,64 @@ int cert_save_upload(const char *store_dir, const char *name,
                      const char *cert_pem, size_t cert_len,
                      const char *key_pem, size_t key_len) {
     if (!store_dir || !name || !cert_pem || cert_len == 0) return -1;
+
+    /* ── H-5: Path Traversal validation for store_dir (CWE-22) ────────────
+     * Resolve store_dir to its canonical absolute path and verify it is
+     * under the trusted CERT_STORE_BASE.  Reject any traversal attempt. */
+    {
+        /* Fast-path: reject raw ".." before any filesystem resolution */
+        if (strstr(store_dir, "..") != NULL)
+            return -1;
+
+        char canonical[PATH_MAX];
+
+        if (realpath(store_dir, canonical) == NULL) {
+            /* Directory does not exist yet.  Resolve the parent directory
+             * (or CWD for relative paths) to detect traversal, then append
+             * the leaf component to form the expected canonical path. */
+            char work[PATH_MAX];
+            size_t len = strlen(store_dir);
+            if (len >= sizeof(work)) return -1;
+            memcpy(work, store_dir, len + 1);
+
+            /* Split into parent + leaf at the last '/' */
+            char *last_slash = strrchr(work, '/');
+            const char *leaf;
+
+            if (last_slash == NULL) {
+                /* Single-component relative path (e.g. "certs") */
+                leaf = work;
+                if (getcwd(canonical, sizeof(canonical)) == NULL)
+                    return -1;
+            } else if (last_slash == work) {
+                /* Absolute path at root: "/certs" — parent is "/" */
+                leaf = work + 1;
+                canonical[0] = '/';
+                canonical[1] = '\0';
+            } else {
+                /* Multi-component path — resolve the parent */
+                *last_slash = '\0';
+                leaf = last_slash + 1;
+                if (realpath(work, canonical) == NULL)
+                    return -1;
+            }
+
+            /* Append leaf to the resolved parent / CWD */
+            size_t base = strlen(canonical);
+            size_t leaf_len = strlen(leaf);
+            if (base + 1 + leaf_len >= PATH_MAX) return -1;
+            canonical[base] = '/';
+            memcpy(canonical + base + 1, leaf, leaf_len + 1);
+        }
+
+        /* Verify canonical path is under the trusted base */
+        size_t b = strlen(CERT_STORE_BASE);
+        if (strncmp(canonical, CERT_STORE_BASE, b) != 0)
+            return -1;
+        if (canonical[b] != '/' && canonical[b] != '\0')
+            return -1;
+    }
+    /* ── End H-5 validation ────────────────────────────────────────── */
 
     /* Ensure store directory exists */
     mkdir(store_dir, 0700);

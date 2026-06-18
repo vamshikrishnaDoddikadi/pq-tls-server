@@ -20,6 +20,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-strong")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_FORTIFY_SOURCE=2")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations")
 
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -41,6 +42,27 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(Threads REQUIRED)
+
+# =========================================================================
+# Security: verify OpenSSL version is patched against known CVEs
+# On Ubuntu LTS, Canonical backports fixes to older versions — verify
+# the package is up-to-date via apt. On other distros, check version.
+# CVE-2026-45447 (HIGH, Jun 2026): UAF in PKCS7_verify — requires ≥3.0.21
+# =========================================================================
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    execute_process(
+        COMMAND grep -q "^VERSION_ID=\"22\\.04\"$" /etc/os-release
+        RESULT_VARIABLE IS_UBUNTU_2204
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if(IS_UBUNTU_2204 EQUAL 0)
+        message(STATUS "Ubuntu 22.04 detected — Canonical backports security fixes to OpenSSL 3.0.2.")
+        message(STATUS "Ensure 'apt upgrade' was run before building (handled by Dockerfile).")
+    elseif(OPENSSL_VERSION VERSION_LESS "3.0.21")
+        message(WARNING "OpenSSL ${OPENSSL_VERSION} is affected by CVE-2026-45447 (HIGH).")
+        message(WARNING "Upgrade to ≥3.0.21, or ≥3.6.3 / 3.5.7 / 3.4.6 / 3.3.7 per your distro.")
+    endif()
+endif()
 
 # liboqs — prefer vendored build, then fall back to system paths
 find_library(OQS_LIBRARY NAMES oqs

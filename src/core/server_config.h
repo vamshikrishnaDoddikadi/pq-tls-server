@@ -93,6 +93,7 @@ typedef struct {
     char      config_file_path[PQ_MAX_PATH]; /* Path to INI file (for save-back) */
     char      mgmt_admin_user[64];           /* Admin username                   */
     char      mgmt_admin_pass_hash[128];     /* PBKDF2 hash                      */
+    char      mgmt_totp_secret[64];          /* TOTP base32 secret (RFC 6238)    */
     char      cert_store_path[PQ_MAX_PATH];  /* Certificate store directory       */
     int       mgmt_enabled;                  /* Management UI on/off              */
     int       mgmt_localhost_only;           /* Bind mgmt UI to 127.0.0.1 only    */

@@ -45,7 +45,7 @@ int pq_acl_add(const char *ip_or_cidr) {
 
     /* Parse CIDR notation */
     char ip_buf[64];
-    strncpy(ip_buf, ip_or_cidr, sizeof(ip_buf) - 1);
+    snprintf(ip_buf, sizeof(ip_buf), "%s", ip_or_cidr);
     ip_buf[sizeof(ip_buf) - 1] = '\0';
 
     int prefix_len = 32;

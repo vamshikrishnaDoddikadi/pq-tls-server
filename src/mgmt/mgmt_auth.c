@@ -9,11 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include <pthread.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/params.h>
+#include <openssl/core_names.h>
 
-#define PBKDF2_ITERATIONS  100000
+#define PBKDF2_ITERATIONS  600000
 #define PBKDF2_SALT_LEN    16
 #define PBKDF2_KEY_LEN     32
 
@@ -103,8 +106,12 @@ int mgmt_auth_verify_password(const char *password, const char *stored_hash) {
     /* Find first $ */
     const char *p1 = strchr(stored_hash, '$');
     if (!p1) return 0;
-    iterations = atoi(stored_hash);
-    if (iterations <= 0) return 0;
+    {
+        char *endptr = NULL;
+        long itmp = strtol(stored_hash, &endptr, 10);
+        if (*endptr != '\0' || itmp <= 0) return 0;
+        iterations = (int)itmp;
+    }
 
     const char *p2 = strchr(p1 + 1, '$');
     if (!p2) return 0;
@@ -175,7 +182,7 @@ int mgmt_auth_create_session(const char *username, char *token_out) {
 
     mgmt_session_t *s = &auth.sessions[slot];
     memcpy(s->token, token_hex, MGMT_TOKEN_HEX_LEN + 1);
-    strncpy(s->username, username, sizeof(s->username) - 1);
+    snprintf(s->username, sizeof(s->username), "%s", username);
     s->username[sizeof(s->username) - 1] = '\0';
     s->created_at = time(NULL);
     s->last_active = s->created_at;
@@ -231,6 +238,127 @@ void mgmt_auth_destroy_session(const char *token) {
 
 int mgmt_auth_needs_setup(const pq_server_config_t *cfg) {
     return (cfg->mgmt_admin_user[0] == '\0' || cfg->mgmt_admin_pass_hash[0] == '\0');
+}
+
+/* ========================================================================
+ * TOTP 2FA — RFC 6238 (HMAC-SHA1, 6-digit, 30-second time step)
+ * ======================================================================== */
+
+static const char BASE32_ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+static int base32_decode(const char *in, unsigned char *out, size_t out_max) {
+    size_t in_len = strlen(in);
+    size_t bitbuf = 0;
+    int bitcount = 0;
+    size_t out_pos = 0;
+
+    for (size_t i = 0; i < in_len; i++) {
+        char c = in[i];
+        if (c == '=') break; /* padding */
+        const char *p = strchr(BASE32_ALPHABET, c);
+        if (!p) return -1;
+        bitbuf = (bitbuf << 5) | (unsigned int)(p - BASE32_ALPHABET);
+        bitcount += 5;
+        if (bitcount >= 8) {
+            bitcount -= 8;
+            if (out_pos >= out_max) return -1;
+            out[out_pos++] = (unsigned char)(bitbuf >> bitcount);
+        }
+    }
+    return (int)out_pos;
+}
+
+static void base32_encode(const unsigned char *in, size_t in_len, char *out) {
+    size_t bitbuf = 0;
+    int bitcount = 0;
+    size_t out_pos = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        bitbuf = (bitbuf << 8) | in[i];
+        bitcount += 8;
+        while (bitcount >= 5) {
+            bitcount -= 5;
+            out[out_pos++] = BASE32_ALPHABET[(bitbuf >> bitcount) & 0x1F];
+        }
+    }
+    if (bitcount > 0) {
+        out[out_pos++] = BASE32_ALPHABET[(bitbuf << (5 - bitcount)) & 0x1F];
+    }
+    out[out_pos] = '\0';
+}
+
+int mgmt_auth_totp_generate_secret(char *out, size_t out_size) {
+    if (!out || out_size < MGMT_TOTP_BASE32_LEN + 1) return -1;
+    unsigned char secret[MGMT_TOTP_SECRET_BYTES];
+    if (RAND_bytes(secret, MGMT_TOTP_SECRET_BYTES) != 1) return -1;
+    base32_encode(secret, MGMT_TOTP_SECRET_BYTES, out);
+    return 0;
+}
+
+int mgmt_auth_totp_verify(const char *code, const char *secret_b32) {
+    if (!code || !secret_b32 || strlen(code) != MGMT_TOTP_DIGITS) return 0;
+
+    /* Decode base32 secret */
+    unsigned char key[MGMT_TOTP_SECRET_BYTES];
+    int key_len = base32_decode(secret_b32, key, sizeof(key));
+    if (key_len <= 0) return 0;
+
+    /* Parse code as integer */
+    long code_val = strtol(code, NULL, 10);
+    if (code_val < 0 || code_val > 999999) return 0;
+
+    /* Compute current time step (RFC 6238 §4.1) */
+    uint64_t counter = (uint64_t)time(NULL) / MGMT_TOTP_PERIOD;
+
+    /* Try ±window steps to tolerate clock skew */
+    for (int offset = -MGMT_TOTP_WINDOW; offset <= MGMT_TOTP_WINDOW; offset++) {
+        uint64_t step = counter + (int64_t)offset;
+        /* Convert counter to big-endian 8 bytes */
+        unsigned char msg[8];
+        for (int i = 7; i >= 0; i--) {
+            msg[i] = (unsigned char)(step & 0xFF);
+            step >>= 8;
+        }
+
+        /* HMAC-SHA1(key, msg) */
+        unsigned char hmac[20]; /* SHA1 digest = 20 bytes */
+        size_t hmac_len = sizeof(hmac);
+        int ok = 0;
+
+        EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+        if (mac) {
+            EVP_MAC_CTX *mctx = EVP_MAC_CTX_new(mac);
+            OSSL_PARAM params[] = {
+                OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+                                                 "SHA1", 0),
+                OSSL_PARAM_END
+            };
+            if (EVP_MAC_init(mctx, key, (size_t)key_len, params)
+                && EVP_MAC_update(mctx, msg, sizeof(msg))
+                && EVP_MAC_final(mctx, hmac, &hmac_len, sizeof(hmac))) {
+                ok = 1;
+            }
+            EVP_MAC_CTX_free(mctx);
+            EVP_MAC_free(mac);
+        }
+
+        if (!ok) continue;
+
+        /* Dynamic truncation (RFC 4226 §5.3) */
+        int offset_dt = hmac[hmac_len - 1] & 0x0F;
+        unsigned int binary =
+            ((unsigned int)(hmac[offset_dt] & 0x7F) << 24) |
+            ((unsigned int)(hmac[offset_dt + 1]) << 16) |
+            ((unsigned int)(hmac[offset_dt + 2]) << 8) |
+            ((unsigned int)(hmac[offset_dt + 3]));
+
+        unsigned int totp = binary % 1000000;
+        if ((unsigned long)code_val == totp) return 1;
+    }
+    return 0;
+}
+
+int mgmt_auth_is_totp_enabled(const pq_server_config_t *cfg) {
+    return (cfg && cfg->mgmt_totp_secret[0] != '\0');
 }
 
 void mgmt_auth_cleanup(void) {

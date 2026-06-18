@@ -253,7 +253,7 @@ static int p256_encapsulate(const uint8_t *pk, uint8_t *ct, uint8_t *ss)
     if (!OSSL_PARAM_BLD_push_utf8_string(bld, "group", "prime256v1", 0)) { BN_free(priv_bn); OSSL_PARAM_BLD_free(bld); goto enc_done; }
     if (!OSSL_PARAM_BLD_push_octet_string(bld, "pub", eph_pk, P256_PK_SIZE)) { BN_free(priv_bn); OSSL_PARAM_BLD_free(bld); goto enc_done; }
     if (!OSSL_PARAM_BLD_push_BN(bld, "priv", priv_bn)) { BN_free(priv_bn); OSSL_PARAM_BLD_free(bld); goto enc_done; }
-    BN_free(priv_bn);
+    /* BN ownership transferred to param builder by push_BN — do NOT free here */
 
     params = OSSL_PARAM_BLD_to_param(bld);
     OSSL_PARAM_BLD_free(bld);
@@ -267,6 +267,7 @@ static int p256_encapsulate(const uint8_t *pk, uint8_t *ct, uint8_t *ss)
     if (EVP_PKEY_fromdata(pctx, &self, EVP_PKEY_KEYPAIR, params) <= 0) { EVP_PKEY_CTX_free(pctx); OSSL_PARAM_free(params); goto enc_done; }
     EVP_PKEY_CTX_free(pctx);
     OSSL_PARAM_free(params);
+    BN_free(priv_bn);
 
     /* Derive */
     EVP_PKEY_CTX *dctx = EVP_PKEY_CTX_new(self, NULL);

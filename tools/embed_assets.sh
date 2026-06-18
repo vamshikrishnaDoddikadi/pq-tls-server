@@ -64,10 +64,9 @@ sys.stdout.write('\n')
 
     echo "};" >> "$OUTPUT_C"
     file_size=$(wc -c < "$file" | tr -d ' ')
-    echo "static const size_t ${var_name}_len = ${file_size};" >> "$OUTPUT_C"
     echo "" >> "$OUTPUT_C"
 
-    ASSET_NAMES="$ASSET_NAMES ${var_name}|${rel_path}|${file_size}"
+    ASSET_NAMES="$ASSET_NAMES ${var_name}|${rel_path}"
     ASSET_COUNT=$((ASSET_COUNT + 1))
 
 done < <(find "$STATIC_DIR" -type f -print0 | sort -z)

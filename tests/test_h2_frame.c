@@ -41,7 +41,7 @@ TEST(test_parse_frame_header) {
     original.length = 100;
     original.flags = H2_FLAG_END_STREAM;
 
-    uint8_t buf[H2_FRAME_HEADER_SIZE];
+    uint8_t buf[H2_FRAME_HEADER_SIZE] = {0};
 
     /* Encode the frame */
     int bytes_written = h2_frame_encode_header(&original, buf, sizeof(buf));
@@ -81,7 +81,7 @@ TEST(test_settings_frame) {
 
 /* Test: Encode SETTINGS ACK frame */
 TEST(test_settings_ack_frame) {
-    uint8_t buf[H2_FRAME_HEADER_SIZE];
+    uint8_t buf[H2_FRAME_HEADER_SIZE] = {0};
 
     int bytes = h2_frame_encode_settings(buf, sizeof(buf), 1);  /* ack=1 */
 
@@ -119,7 +119,7 @@ TEST(test_goaway_frame) {
 
 /* Test: Insufficient data for frame parse */
 TEST(test_insufficient_data) {
-    uint8_t buf[5];  /* Less than H2_FRAME_HEADER_SIZE (9) */
+    uint8_t buf[5] = {0};  /* Less than H2_FRAME_HEADER_SIZE (9) */
     h2_frame_header_t frame;
 
     int ret = h2_frame_parse_header(buf, sizeof(buf), &frame);
@@ -134,7 +134,7 @@ TEST(test_large_stream_id) {
     h2_frame_header_t original = create_test_frame(0x7FFFFFFF);  /* Max 31-bit value */
     original.length = 50;
 
-    uint8_t buf[H2_FRAME_HEADER_SIZE];
+    uint8_t buf[H2_FRAME_HEADER_SIZE] = {0};
 
     int bytes_written = h2_frame_encode_header(&original, buf, sizeof(buf));
     ASSERT(bytes_written == H2_FRAME_HEADER_SIZE);
@@ -155,7 +155,7 @@ TEST(test_data_frame_length) {
     original.length = 1000;
     original.type = H2_FRAME_DATA;
 
-    uint8_t buf[H2_FRAME_HEADER_SIZE];
+    uint8_t buf[H2_FRAME_HEADER_SIZE] = {0};
 
     int bytes_written = h2_frame_encode_header(&original, buf, sizeof(buf));
     ASSERT(bytes_written == H2_FRAME_HEADER_SIZE);
@@ -175,7 +175,7 @@ TEST(test_frame_flags) {
     original.type = H2_FRAME_HEADERS;
     original.flags = H2_FLAG_END_STREAM | H2_FLAG_END_HEADERS;
 
-    uint8_t buf[H2_FRAME_HEADER_SIZE];
+    uint8_t buf[H2_FRAME_HEADER_SIZE] = {0};
 
     int bytes_written = h2_frame_encode_header(&original, buf, sizeof(buf));
     ASSERT(bytes_written == H2_FRAME_HEADER_SIZE);

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <stdatomic.h>
 #include <openssl/crypto.h>
@@ -122,6 +123,17 @@ void mgmt_api_auth_login(mgmt_api_ctx_t *ctx) {
         return;
     }
 
+    /* TOTP 2FA — if configured, require a valid TOTP code */
+    if (mgmt_auth_is_totp_enabled(ctx->config)) {
+        char totp_code[8] = {0};
+        if (json_extract_string(ctx->body, "totp_code", totp_code, sizeof(totp_code)) != 0
+            || !mgmt_auth_totp_verify(totp_code, ctx->config->mgmt_totp_secret)) {
+            send_error(ctx->client_fd, "401 Unauthorized",
+                       "Invalid TOTP code — 2FA is required");
+            return;
+        }
+    }
+
     char token[MGMT_TOKEN_HEX_LEN + 1];
     if (mgmt_auth_create_session(username, token) != 0) {
         send_error(ctx->client_fd, "500 Internal Server Error", "Session creation failed");
@@ -193,8 +205,8 @@ void mgmt_api_auth_setup(mgmt_api_ctx_t *ctx) {
     }
 
     /* Update config */
-    strncpy(ctx->config->mgmt_admin_user, username, sizeof(ctx->config->mgmt_admin_user) - 1);
-    strncpy(ctx->config->mgmt_admin_pass_hash, hash, sizeof(ctx->config->mgmt_admin_pass_hash) - 1);
+    snprintf(ctx->config->mgmt_admin_user, sizeof(ctx->config->mgmt_admin_user), "%s", username);
+    snprintf(ctx->config->mgmt_admin_pass_hash, sizeof(ctx->config->mgmt_admin_pass_hash), "%s", hash);
     ctx->config->mgmt_enabled = 1;
 
     /* Save config */
@@ -283,7 +295,8 @@ void mgmt_api_config_get(mgmt_api_ctx_t *ctx) {
     {
         const char *levels[] = {"debug", "info", "warn", "error"};
         int lvl = cfg->log_level;
-        if (lvl < 0) lvl = 0; if (lvl > 3) lvl = 3;
+        if (lvl < 0) lvl = 0;
+        if (lvl > 3) lvl = 3;
         jb_key_str(&jb, "level", levels[lvl]);
     }
     jb_key_bool(&jb, "access_log", cfg->access_log);
@@ -360,7 +373,7 @@ void mgmt_api_config_put_listen(mgmt_api_ctx_t *ctx) {
     long port;
 
     if (json_extract_string(ctx->body, "address", address, sizeof(address)) == 0)
-        strncpy(ctx->config->bind_address, address, sizeof(ctx->config->bind_address) - 1);
+        snprintf(ctx->config->bind_address, sizeof(ctx->config->bind_address), "%s", address);
     if (json_extract_int(ctx->body, "port", &port) == 0 && port > 0 && port <= 65535)
         ctx->config->listen_port = (uint16_t)port;
 
@@ -375,17 +388,17 @@ void mgmt_api_config_put_tls(mgmt_api_ctx_t *ctx) {
     int client_auth;
 
     if (json_extract_string(ctx->body, "groups", groups, sizeof(groups)) == 0)
-        strncpy(ctx->config->tls_groups, groups, sizeof(ctx->config->tls_groups) - 1);
+        snprintf(ctx->config->tls_groups, sizeof(ctx->config->tls_groups), "%s", groups);
     if (json_extract_string(ctx->body, "min_version", min_ver, sizeof(min_ver)) == 0) {
         if (strcmp(min_ver, "1.2") == 0) ctx->config->tls_min_version = 0x0303;
         else if (strcmp(min_ver, "1.3") == 0) ctx->config->tls_min_version = 0x0304;
     }
     if (json_extract_string(ctx->body, "cert", cert, sizeof(cert)) == 0)
-        strncpy(ctx->config->cert_file, cert, sizeof(ctx->config->cert_file) - 1);
+        snprintf(ctx->config->cert_file, sizeof(ctx->config->cert_file), "%s", cert);
     if (json_extract_string(ctx->body, "key", key, sizeof(key)) == 0)
-        strncpy(ctx->config->key_file, key, sizeof(ctx->config->key_file) - 1);
+        snprintf(ctx->config->key_file, sizeof(ctx->config->key_file), "%s", key);
     if (json_extract_string(ctx->body, "ca", ca, sizeof(ca)) == 0)
-        strncpy(ctx->config->ca_file, ca, sizeof(ctx->config->ca_file) - 1);
+        snprintf(ctx->config->ca_file, sizeof(ctx->config->ca_file), "%s", ca);
     if (json_extract_int(ctx->body, "session_cache_size", &cache) == 0)
         ctx->config->session_cache_size = (int)cache;
     if (json_extract_bool(ctx->body, "client_auth", &client_auth) == 0)
@@ -521,7 +534,7 @@ void mgmt_api_config_put_logging(mgmt_api_ctx_t *ctx) {
 
     if (json_extract_string(ctx->body, "file", file, sizeof(file)) == 0) {
         if (strcmp(file, ctx->config->log_file) != 0) {
-            strncpy(ctx->config->log_file, file, sizeof(ctx->config->log_file) - 1);
+            snprintf(ctx->config->log_file, sizeof(ctx->config->log_file), "%s", file);
             restart_needed = 1;
         }
     }
@@ -934,7 +947,13 @@ void mgmt_api_logs_recent(mgmt_api_ctx_t *ctx) {
     const char *q = strchr(ctx->path, '?');
     if (q) {
         const char *lines_param = strstr(q, "lines=");
-        if (lines_param) count = atoi(lines_param + 6);
+        if (lines_param) {
+            char *endptr = NULL;
+            long ctmp = strtol(lines_param + 6, &endptr, 10);
+            if (*endptr == '\0' && ctmp > 0) {
+                count = (int)ctmp;
+            }
+        }
     }
     if (count <= 0) count = 100;
     if (count > LOG_RING_SIZE) count = LOG_RING_SIZE;
@@ -1038,11 +1057,19 @@ int mgmt_api_dispatch(mgmt_api_ctx_t *ctx) {
     if (strcmp(p, "/api/certs/generate") == 0 && strcmp(m, "POST") == 0) {
         mgmt_api_certs_generate(ctx); return 1;
     }
-    if (strncmp(p, "/api/certs/", 11) == 0 && strstr(p, "/apply") && strcmp(m, "POST") == 0) {
-        mgmt_api_certs_apply(ctx); return 1;
+    if (strncmp(p, "/api/certs/", 11) == 0 && strcmp(m, "POST") == 0) {
+        /* Cert apply: path must end with exactly "/apply" */
+        size_t plen = strlen(p);
+        if (plen >= 6 && strcmp(p + plen - 6, "/apply") == 0) {
+            mgmt_api_certs_apply(ctx); return 1;
+        }
     }
-    if (strncmp(p, "/api/certs/", 11) == 0 && strstr(p, "/details") && strcmp(m, "GET") == 0) {
-        mgmt_api_certs_details(ctx); return 1;
+    if (strncmp(p, "/api/certs/", 11) == 0 && strcmp(m, "GET") == 0) {
+        /* Cert details: path must end with exactly "/details" */
+        size_t plen = strlen(p);
+        if (plen >= 8 && strcmp(p + plen - 8, "/details") == 0) {
+            mgmt_api_certs_details(ctx); return 1;
+        }
     }
 
     /* Management endpoints */

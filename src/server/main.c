@@ -8,6 +8,9 @@
 #include "../core/server_config.h"
 #include "../core/connection_manager.h"
 #include "../benchmark/bench.h"
+#include "../benchmark/bench_agility.h"
+#include "../common/crypto_registry.h"
+#include "../common/hybrid_combiner.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,7 +136,8 @@ static void print_banner(void) {
 
 static void print_help(const char *prog) {
     printf("Usage: %s [OPTIONS]\n", prog);
-    printf("       %s benchmark [--iterations N] [--format table|json|csv]\n\n", prog);
+    printf("       %s benchmark [--iterations N] [--format table|json|csv]\n", prog);
+    printf("       %s agility [-n N] [-w N] [-o file.csv] [-j file.json] [-v]\n\n", prog);
     printf("Options:\n");
     printf("  -f, --config FILE    Configuration file (INI format)\n");
     printf("  -p, --port PORT      Listen port (default: 8443)\n");
@@ -156,7 +160,9 @@ static void print_help(const char *prog) {
     printf("  -h, --help           Show this help\n");
     printf("\nBenchmark:\n");
     printf("  %s benchmark [--iterations 1000] [--format table]\n", prog);
-    printf("  Runs PQ algorithm benchmarks (ML-KEM, ML-DSA, Ed25519)\n");
+    printf("  Runs PQ algorithm benchmarks (ML-KEM, ML-DSA, Ed25519)\n\n");
+    printf("  %s agility [-n 1000] [-w 100] [-o results.csv] [-j results.json]\n", prog);
+    printf("  Crypto-agility benchmark across ALL registry providers incl. hybrids\n");
     printf("\nSignals:\n");
     printf("  SIGHUP   Reload TLS certificates without dropping connections\n");
     printf("  SIGINT   Graceful shutdown\n");
@@ -170,6 +176,103 @@ static void print_help(const char *prog) {
 /* ======================================================================== */
 /* Benchmark subcommand                                                     */
 /* ======================================================================== */
+
+
+/* ======================================================================== */
+/* Agility benchmark subcommand (registry-wide, includes hybrids)            */
+/* ======================================================================== */
+
+static int run_agility(int argc, char **argv) {
+    pq_bench_config_t cfg;
+    pq_bench_config_default(&cfg);
+    char csv_file[512] = {0};
+    char json_file[512] = {0};
+
+    for (int i = 2; i < argc; i++) {
+        if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--iterations") == 0)
+            && i + 1 < argc) {
+            cfg.iterations = atoi(argv[++i]);
+            if (cfg.iterations <= 0) cfg.iterations = 1000;
+        }
+        else if ((strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--warmup") == 0)
+            && i + 1 < argc) {
+            cfg.warmup_iterations = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            cfg.verbose = 1;
+        }
+        else if ((strcmp(argv[i], "-o") == 0) && i + 1 < argc) {
+            snprintf(csv_file, sizeof(csv_file), "%s", argv[++i]);
+        }
+        else if ((strcmp(argv[i], "-j") == 0) && i + 1 < argc) {
+            snprintf(json_file, sizeof(json_file), "%s", argv[++i]);
+        }
+    }
+
+    print_banner();
+
+    /* Initialize registry and load builtins + any plugins */
+    pq_registry_t *reg = pq_registry_create();
+    if (!reg) {
+        fprintf(stderr, "Failed to create algorithm registry\n");
+        return 1;
+    }
+    pq_registry_register_builtins(reg);
+
+    /* Allocate result arrays */
+    pq_kem_bench_result_t *kem_results =
+        calloc(PQ_REGISTRY_MAX_KEM_PROVIDERS, sizeof(pq_kem_bench_result_t));
+    pq_hybrid_bench_result_t *hybrid_results =
+        calloc(PQ_REGISTRY_MAX_HYBRID_KEMS, sizeof(pq_hybrid_bench_result_t));
+
+    if (!kem_results || !hybrid_results) {
+        fprintf(stderr, "Out of memory\n");
+        pq_registry_destroy(reg);
+        free(kem_results);
+        free(hybrid_results);
+        return 1;
+    }
+
+    printf("\n=== Crypto-Agility Benchmark Suite ===\n");
+    printf("Iterations: %d  Warmup: %d\n\n", cfg.iterations, cfg.warmup_iterations);
+
+    /* Benchmark all KEM providers */
+    size_t kem_count = pq_bench_all_kems(reg, &cfg, kem_results, PQ_REGISTRY_MAX_KEM_PROVIDERS);
+    if (kem_count > 0) {
+        pq_bench_print_kem_results(kem_results, kem_count);
+    } else {
+        printf("No KEM providers found in registry.\n");
+    }
+
+    /* Benchmark all hybrid KEM pairs */
+    size_t hybrid_count = pq_bench_all_hybrids(reg, &cfg, hybrid_results,
+                                                PQ_REGISTRY_MAX_HYBRID_KEMS);
+    if (hybrid_count > 0) {
+        printf("\n");
+        pq_bench_print_hybrid_results(hybrid_results, hybrid_count);
+    } else {
+        printf("\nNo hybrid KEM pairs found.\n");
+    }
+
+    /* Export if requested */
+    if (csv_file[0]) {
+        if (pq_bench_export_csv(csv_file, kem_results, kem_count,
+                                hybrid_results, hybrid_count) == 0) {
+            printf("\nResults exported to: %s\n", csv_file);
+        }
+    }
+    if (json_file[0]) {
+        if (pq_bench_export_json(json_file, kem_results, kem_count,
+                                 hybrid_results, hybrid_count) == 0) {
+            printf("Results exported to: %s\n", json_file);
+        }
+    }
+
+    free(kem_results);
+    free(hybrid_results);
+    pq_registry_destroy(reg);
+    return 0;
+}
 
 static int run_benchmark(int argc, char **argv) {
     int iterations = 1000;
@@ -244,9 +347,12 @@ static void daemonize_process(const char *pid_file) {
 /* ======================================================================== */
 
 int main(int argc, char **argv) {
-    /* Check for benchmark subcommand */
+    /* Check for subcommands */
     if (argc >= 2 && strcmp(argv[1], "benchmark") == 0) {
         return run_benchmark(argc, argv);
+    }
+    if (argc >= 2 && strcmp(argv[1], "agility") == 0) {
+        return run_agility(argc, argv);
     }
 
     pq_server_config_t config;
@@ -260,8 +366,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
             /* Store config file path for save-back by management UI */
-            strncpy(config.config_file_path, argv[i + 1],
-                    sizeof(config.config_file_path) - 1);
+            snprintf(config.config_file_path, sizeof(config.config_file_path), "%s", argv[i + 1]);
             break;
         }
     }

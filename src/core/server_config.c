@@ -242,6 +242,8 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
                 safe_copy(cfg->mgmt_admin_user, val, sizeof(cfg->mgmt_admin_user));
             else if (strcmp(key, "admin_pass_hash") == 0)
                 safe_copy(cfg->mgmt_admin_pass_hash, val, sizeof(cfg->mgmt_admin_pass_hash));
+            else if (strcmp(key, "totp_secret") == 0)
+                safe_copy(cfg->mgmt_totp_secret, val, sizeof(cfg->mgmt_totp_secret));
             else if (strcmp(key, "cert_store") == 0)
                 safe_copy(cfg->cert_store_path, val, sizeof(cfg->cert_store_path));
             else if (strcmp(key, "enabled") == 0)

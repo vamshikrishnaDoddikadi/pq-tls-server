@@ -29,6 +29,8 @@ static int g_port = 0;
 /* Embedded HTML Dashboard                                                  */
 /* ======================================================================== */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverlength-strings"
 static const char *DASHBOARD_HTML =
 "<!DOCTYPE html>\n"
 "<html lang=\"en\"><head><meta charset=\"UTF-8\">\n"

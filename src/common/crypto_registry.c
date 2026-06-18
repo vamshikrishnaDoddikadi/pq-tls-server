@@ -209,7 +209,8 @@ int pq_registry_load_plugin(pq_registry_t *reg, const char *path)
         return PQ_ERR_ALGORITHM_NOT_AVAILABLE;
     }
 
-    pq_plugin_init_fn init_fn = (pq_plugin_init_fn)dlsym(handle, "pq_plugin_init");
+    pq_plugin_init_fn init_fn;
+    *(void**)(&init_fn) = dlsym(handle, "pq_plugin_init");
     if (!init_fn) {
         fprintf(stderr, "[registry] %s: missing pq_plugin_init symbol\n", path);
         dlclose(handle);

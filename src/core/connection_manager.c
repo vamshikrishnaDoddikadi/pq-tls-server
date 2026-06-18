@@ -24,6 +24,7 @@
 #include <openssl/provider.h>
 
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -91,11 +92,11 @@ static void setup_oqs_provider_path(void) {
     exe_path[len] = '\0';
 
     char copy1[PATH_MAX], copy2[PATH_MAX], copy3[PATH_MAX];
-    strncpy(copy1, exe_path, PATH_MAX - 1);  copy1[PATH_MAX-1] = '\0';
+    snprintf(copy1, sizeof(copy1), "%s", exe_path);
     char *bin_dir = dirname(copy1);
-    strncpy(copy2, bin_dir,  PATH_MAX - 1);  copy2[PATH_MAX-1] = '\0';
+    snprintf(copy2, sizeof(copy2), "%s", bin_dir);
     char *build_dir = dirname(copy2);
-    strncpy(copy3, build_dir, PATH_MAX - 1); copy3[PATH_MAX-1] = '\0';
+    snprintf(copy3, sizeof(copy3), "%s", build_dir);
     char *root = dirname(copy3);
 
     const char *suffixes[] = {
@@ -155,7 +156,7 @@ static SSL_CTX* create_ssl_ctx(pq_conn_manager_t *mgr) {
     }
     if (!mgr->oqs_provider) {
         fprintf(stderr, "Warning: OQS provider not loaded — post-quantum groups unavailable\n");
-        fprintf(stderr, "  OPENSSL_MODULES=%s\n", getenv("OPENSSL_MODULES") ?: "(not set)");
+        fprintf(stderr, "  OPENSSL_MODULES=%s\n", getenv("OPENSSL_MODULES") ? getenv("OPENSSL_MODULES") : "(not set)");
         fprintf(stderr, "  Continuing with classical TLS only.\n");
     }
 
@@ -445,7 +446,7 @@ static int connect_unix_socket(const char *path, int timeout_ms) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
 
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) { close(fd); return -1; }
@@ -708,7 +709,7 @@ pq_conn_manager_t* pq_conn_manager_create(const pq_server_config_t *cfg) {
     if (cfg->log_file[0]) {
         mgr->log_fp = fopen(cfg->log_file, "a");
         if (!mgr->log_fp) {
-            fprintf(stderr, "Cannot open log file '%s': %m\n", cfg->log_file);
+            fprintf(stderr, "Cannot open log file '%s': %s\n", cfg->log_file, strerror(errno));
             goto fail_early;
         }
     } else {

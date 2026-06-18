@@ -49,9 +49,9 @@ void log_streamer_push(const char *level, const char *message) {
     pthread_mutex_lock(&ls.mutex);
 
     log_entry_t *e = &ls.ring[ls.head];
-    strncpy(e->level, level, sizeof(e->level) - 1);
+    snprintf(e->level, sizeof(e->level), "%s", level);
     e->level[sizeof(e->level) - 1] = '\0';
-    strncpy(e->message, message, sizeof(e->message) - 1);
+    snprintf(e->message, sizeof(e->message), "%s", message);
     e->message[sizeof(e->message) - 1] = '\0';
 
     time_t now = time(NULL);
@@ -121,45 +121,54 @@ void log_streamer_stream_sse(int client_fd) {
     int last_head = ls.head;
 
     while (atomic_load(&ls.running)) {
+        int batch_count = 0;
+        log_entry_t pending[LOG_RING_SIZE];
+
+        /* SECURITY: Read new entries from the ring buffer while holding
+         * the mutex, then unlock BEFORE sending data to the client.
+         * Previously the mutex was held during send() (blocking I/O),
+         * which could stall log_streamer_push() indefinitely if the
+         * client had a slow connection. CWE-667. */
         pthread_mutex_lock(&ls.mutex);
 
         int current_head = ls.head;
-        if (current_head != last_head) {
-            /* Send new entries */
-            int start = last_head;
-            int end = current_head;
+        int start = last_head;
 
-            while (start != end) {
-                log_entry_t *e = &ls.ring[start];
-
-                /* Build properly escaped JSON */
-                char json_buf[LOG_LINE_MAX + 256];
-                json_builder_t jb;
-                jb_init(&jb, json_buf, sizeof(json_buf));
-                jb_object_start(&jb);
-                jb_key_str(&jb, "ts", e->timestamp);
-                jb_key_str(&jb, "level", e->level);
-                jb_key_str(&jb, "msg", e->message);
-                jb_object_end(&jb);
-                jb_finish(&jb);
-
-                char event[LOG_LINE_MAX + 300];
-                int n = snprintf(event, sizeof(event), "data: %s\n\n", json_buf);
-
-                if (n > 0) {
-                    ssize_t sent = send(client_fd, event, (size_t)n, MSG_NOSIGNAL);
-                    if (sent <= 0) {
-                        pthread_mutex_unlock(&ls.mutex);
-                        goto done;
-                    }
-                }
-
-                start = (start + 1) % LOG_RING_SIZE;
-            }
-            last_head = current_head;
+        while (start != current_head) {
+            pending[batch_count] = ls.ring[start];
+            batch_count++;
+            start = (start + 1) % LOG_RING_SIZE;
         }
+        last_head = current_head;
 
         pthread_mutex_unlock(&ls.mutex);
+
+        /* Send all batched entries now (no lock held during I/O) */
+        for (int i = 0; i < batch_count; i++) {
+            log_entry_t *e = &pending[i];
+
+            /* Build properly escaped JSON */
+            char json_buf[LOG_LINE_MAX + 256];
+            json_builder_t jb;
+            jb_init(&jb, json_buf, sizeof(json_buf));
+            jb_object_start(&jb);
+            jb_key_str(&jb, "ts", e->timestamp);
+            jb_key_str(&jb, "level", e->level);
+            jb_key_str(&jb, "msg", e->message);
+            jb_object_end(&jb);
+            jb_finish(&jb);
+
+            char event[LOG_LINE_MAX + 300];
+            int n = snprintf(event, sizeof(event), "data: %s\n\n", json_buf);
+
+            if (n > 0) {
+                ssize_t sent = send(client_fd, event, (size_t)n, MSG_NOSIGNAL);
+                if (sent <= 0) {
+                    goto done;
+                }
+            }
+        }
+
         usleep(500000); /* 500ms poll interval */
     }
 

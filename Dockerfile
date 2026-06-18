@@ -18,7 +18,12 @@ FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# SECURITY: Always pull latest security-patched packages before building.
+# Ubuntu 22.04 backports OpenSSL CVEs to 3.0.2 (Canonical LTS model).
+# This apt upgrade is the gate for CVE-2026-45447 (HIGH, Jun 2026) and
+# all other OpenSSL 3.x CVEs patched in Ubuntu's security repos.
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build git ca-certificates \
     libssl-dev pkg-config python3 astyle curl xxd \
     && rm -rf /var/lib/apt/lists/*
@@ -64,7 +69,9 @@ RUN mkdir build && cd build && \
 # --- Stage 2: Runtime image ---
 FROM ubuntu:22.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# SECURITY: apt upgrade pulls latest patched libssl3 (CVE-2026-45447 fix)
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
     libssl3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

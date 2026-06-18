@@ -186,13 +186,13 @@ static int _pq_fork_worker(pq_master_t *m, int worker_idx) {
 
     /* Create control pipe: [0]=read, [1]=write */
     if (pipe(w->pipe_fd) < 0) {
-        syslog(LOG_ERR, "Failed to create control pipe for worker %d: %m", worker_idx);
+        syslog(LOG_ERR, "Failed to create control pipe for worker %d: %s", worker_idx, strerror(errno));
         return -1;
     }
 
     /* Set read end to non-blocking for worker */
     if (_pq_set_nonblocking(w->pipe_fd[0]) < 0) {
-        syslog(LOG_ERR, "Failed to set pipe non-blocking: %m");
+        syslog(LOG_ERR, "Failed to set pipe non-blocking: %s", strerror(errno));
         close(w->pipe_fd[0]);
         close(w->pipe_fd[1]);
         w->pipe_fd[0] = -1;
@@ -202,7 +202,7 @@ static int _pq_fork_worker(pq_master_t *m, int worker_idx) {
 
     pid_t child = fork();
     if (child < 0) {
-        syslog(LOG_ERR, "Failed to fork worker process: %m");
+        syslog(LOG_ERR, "Failed to fork worker process: %s", strerror(errno));
         close(w->pipe_fd[0]);
         close(w->pipe_fd[1]);
         w->pipe_fd[0] = -1;
@@ -319,7 +319,7 @@ static void _pq_master_reap_workers(pq_master_t *m, int block) {
     }
 
     if (pid < 0 && errno != ECHILD) {
-        syslog(LOG_ERR, "waitpid() error: %m");
+        syslog(LOG_ERR, "waitpid() error: %s", strerror(errno));
     }
 }
 
@@ -669,7 +669,7 @@ int pq_worker_main(const void *config, int listen_fd, int control_pipe_rd) {
                 break;
             }
         } else if (msg_ready < 0) {
-            syslog(LOG_ERR, "Error reading control pipe: %m");
+            syslog(LOG_ERR, "Error reading control pipe: %s", strerror(errno));
             return 1;
         }
 

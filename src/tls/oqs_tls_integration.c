@@ -558,11 +558,36 @@ int oqs_tls_configure_ssl_ctx(oqs_tls_context_t *ctx, void *ssl_ctx) {
     if (ctx->config.enable_hybrid && ctx->config.hybrid_mode != OQS_HYBRID_NONE) {
         const char *groups = oqs_hybrid_group_string(ctx->config.hybrid_mode);
         if (groups && groups[0] != '\0') {
-            /* Add classical fallback groups */
-            char group_list[256];
-            snprintf(group_list, sizeof(group_list), "%s:X25519:P-256:P-384", groups);
-            SSL_CTX_set1_groups_list(sctx, group_list);
+            if (ctx->config.allow_classical_fallback) {
+                /* Add classical fallback groups after PQ groups.
+                 * OpenSSL will negotiate in order: PQ hybrid first,
+                 * then classical-only if PQ is unavailable.
+                 * SECURITY: This allows silent downgrade to classical-only
+                 * TLS if the PQ group fails to negotiate (e.g., oqsprovider
+                 * not loaded correctly on the peer). Log a warning so the
+                 * operator is aware every time the server starts. */
+                char group_list[256];
+                snprintf(group_list, sizeof(group_list), "%s:X25519:P-256:P-384", groups);
+                SSL_CTX_set1_groups_list(sctx, group_list);
+                fprintf(stderr, "[WARNING] TLS classical fallback enabled — "
+                        "connections may downgrade to classical-only crypto "
+                        "if PQ negotiation fails. Use --require-pq to disable.\n");
+            } else {
+                /* No classical fallback — only PQ hybrid groups.
+                 * If the PQ group fails to negotiate, the TLS handshake
+                 * will fail. This is the security-hardened configuration
+                 * that prevents silent downgrade attacks (CWE-757). */
+                SSL_CTX_set1_groups_list(sctx, groups);
+                fprintf(stderr, "[INFO] TLS PQ groups enforced (no classical "
+                        "fallback) — only %s allowed for key exchange.\n", groups);
+            }
         }
+    } else if (ctx->config.require_pq) {
+        /* PQ was required by config but no hybrid mode is enabled.
+         * This is a configuration error — fail the deployment. */
+        fprintf(stderr, "[ERROR] PQ TLS required (--require-pq) but no hybrid "
+                "PQ groups configured. Cannot provide PQ-only TLS.\n");
+        return -3;
     }
     
     ctx->ssl_ctx = ssl_ctx;

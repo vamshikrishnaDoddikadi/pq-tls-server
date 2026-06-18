@@ -253,13 +253,19 @@ TEST(test_max_header_overflow) {
 
     /* Build a request with headers exceeding PQ_HTTP_MAX_HEADER_SIZE */
     char large_data[PQ_HTTP_MAX_HEADER_SIZE + 1024];
-    strcpy(large_data, "GET / HTTP/1.1\r\nHost: example.com\r\n");
+    size_t pos = 0;
+    int ret = snprintf(large_data, sizeof(large_data), "%s", "GET / HTTP/1.1\r\nHost: example.com\r\n");
+    if (ret > 0) pos = (size_t)ret;
+    if (pos >= sizeof(large_data)) pos = sizeof(large_data) - 1;
 
     /* Add headers until we exceed the max */
     for (int i = 0; i < 100; i++) {
-        strcat(large_data, "X-Custom-Header: value-with-some-data-to-make-it-longer\r\n");
+        ret = snprintf(large_data + pos, sizeof(large_data) - pos, "%s", "X-Custom-Header: value-with-some-data-to-make-it-longer\r\n");
+        if (ret > 0) pos += (size_t)ret;
+        if (pos >= sizeof(large_data)) pos = sizeof(large_data) - 1;
     }
-    strcat(large_data, "\r\n");
+    ret = snprintf(large_data + pos, sizeof(large_data) - pos, "%s", "\r\n");
+    if (ret > 0) pos += (size_t)ret;
 
     pq_http_parse_status_t status = pq_http_request_parse(&req, large_data, strlen(large_data), &consumed);
 

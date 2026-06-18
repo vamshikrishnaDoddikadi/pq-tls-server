@@ -50,7 +50,7 @@ void pq_log(log_level_t level, const char *format, ...) {
     static const int level_count = sizeof(level_str) / sizeof(level_str[0]);
 
     /* Bounds check to prevent out-of-range array access */
-    const char *lstr = (level >= 0 && level < level_count) ? level_str[level] : "UNKNOWN";
+    const char *lstr = ((int)level >= 0 && (int)level < level_count) ? level_str[level] : "UNKNOWN";
 
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);

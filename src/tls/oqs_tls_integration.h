@@ -107,6 +107,7 @@ typedef struct {
     bool enable_hybrid;           /**< Enable hybrid classical+PQ mode */
     bool prefer_pq;               /**< Prefer PQ algorithms over classical */
     bool allow_classical_fallback;/**< Allow fallback to classical if PQ fails */
+    bool require_pq;              /**< Fail handshake if PQ cannot be negotiated */
     const char *cert_file;        /**< Path to certificate file */
     const char *key_file;         /**< Path to private key file */
     const char *ca_file;          /**< Path to CA certificate file */

@@ -17,11 +17,9 @@ CFLAGS   += -D_GNU_SOURCE
 OQS_INC     := $(PROJ)/vendor/liboqs/include
 OQS_LIB     := $(PROJ)/vendor/liboqs/lib
 ifneq ($(wildcard $(OQS_INC)/oqs/oqs.h),)
-  # Vendor exists
+  # Vendor exists at default path
 else
-  # Fall back to main project vendor
-  OQS_INC     := /media/vamshi/SYSTEM/Work-pc-desktop/pq-tls-server/vendor/liboqs/include
-  OQS_LIB     := /media/vamshi/SYSTEM/Work-pc-desktop/pq-tls-server/vendor/liboqs/lib
+  $(warning liboqs not found in vendor/liboqs/ — set OQS_INC and OQS_LIB manually)
 endif
 
 INCLUDES := -I$(PROJ)/src/common \
