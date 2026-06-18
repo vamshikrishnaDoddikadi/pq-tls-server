@@ -429,6 +429,16 @@ h4 { font-size: 1rem; }
 }
 .btn-destructive:hover { filter: brightness(1.2); }
 
+/* Aliases for JS-generated buttons */
+.btn-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); box-shadow: var(--shadow-sm); }
+.btn-primary:hover { filter: brightness(1.15); box-shadow: 0 0 12px hsl(var(--primary) / 0.3); }
+.btn-success { background: hsl(var(--success)); color: hsl(var(--primary-foreground)); box-shadow: var(--shadow-sm); }
+.btn-success:hover { filter: brightness(1.15); box-shadow: 0 0 12px hsl(var(--success) / 0.3); }
+.btn-danger { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
+.btn-danger:hover { filter: brightness(1.2); }
+.btn-warning { background: hsl(var(--warning)); color: #0F172A; }
+.btn-warning:hover { filter: brightness(1.15); }
+
 .btn-sm { font-size: 0.7rem; padding: 0.375rem 0.625rem; }
 .btn-lg { font-size: 0.875rem; padding: 0.625rem 1.25rem; }
 .btn-icon { padding: 0.5rem; min-width: 2.25rem; }
