@@ -155,6 +155,14 @@ static SSL_CTX* create_ssl_ctx(pq_conn_manager_t *mgr) {
         return NULL;
     }
     if (!mgr->oqs_provider) {
+        if (cfg->require_pq) {
+            fprintf(stderr, "FATAL: OQS provider not loaded but --require-pq is set.\n");
+            fprintf(stderr, "  Post-quantum enforcement requires the OQS OpenSSL provider.\n");
+            fprintf(stderr, "  Install oqs-provider or remove the --require-pq flag.\n");
+            fprintf(stderr, "  OPENSSL_MODULES=%s\n", getenv("OPENSSL_MODULES") ? getenv("OPENSSL_MODULES") : "(not set)");
+            if (mgr->default_provider) { OSSL_PROVIDER_unload(mgr->default_provider); mgr->default_provider = NULL; }
+            return NULL;
+        }
         fprintf(stderr, "Warning: OQS provider not loaded — post-quantum groups unavailable\n");
         fprintf(stderr, "  OPENSSL_MODULES=%s\n", getenv("OPENSSL_MODULES") ? getenv("OPENSSL_MODULES") : "(not set)");
         fprintf(stderr, "  Continuing with classical TLS only.\n");
@@ -204,8 +212,31 @@ static SSL_CTX* create_ssl_ctx(pq_conn_manager_t *mgr) {
         }
 
         if (groups_to_use[0] && SSL_CTX_set1_groups_list(ctx, groups_to_use) != 1) {
+            if (cfg->require_pq) {
+                fprintf(stderr, "FATAL: --require-pq set but groups list '%s' is invalid\n",
+                        groups_to_use);
+                SSL_CTX_free(ctx);
+                if (mgr->oqs_provider) OSSL_PROVIDER_unload(mgr->oqs_provider);
+                if (mgr->default_provider) OSSL_PROVIDER_unload(mgr->default_provider);
+                mgr->oqs_provider = NULL;
+                mgr->default_provider = NULL;
+                return NULL;
+            }
             fprintf(stderr, "Warning: failed to set groups '%s', falling back to defaults\n",
                     groups_to_use);
+        }
+        if (cfg->require_pq && groups_to_use[0]
+            && !strstr(groups_to_use, "MLKEM") && !strstr(groups_to_use, "Kyber")
+            && !strstr(groups_to_use, "frodo") && !strstr(groups_to_use, "bike")
+            && !strstr(groups_to_use, "hqc")) {
+            fprintf(stderr, "FATAL: --require-pq set but no post-quantum group in '%s'\n",
+                    groups_to_use);
+            SSL_CTX_free(ctx);
+            if (mgr->oqs_provider) OSSL_PROVIDER_unload(mgr->oqs_provider);
+            if (mgr->default_provider) OSSL_PROVIDER_unload(mgr->default_provider);
+            mgr->oqs_provider = NULL;
+            mgr->default_provider = NULL;
+            return NULL;
         }
     }
 

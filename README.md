@@ -472,10 +472,29 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Author
 
-**Vamshi Krishna Doddikadi** — [LinkedIn](https://www.linkedin.com/in/vamshivivaan)
+**Vamshi Krishna Doddikadi**
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-vamshivivaan-0a66c2?style=flat-square&logo=linkedin)](https://www.linkedin.com/in/vamshivivaan)
+[![GitHub](https://img.shields.io/badge/GitHub-vamshikrishnaDoddikadi-181717?style=flat-square&logo=github)](https://github.com/vamshikrishnaDoddikadi)
+
+Security Engineer & Systems Programmer — Berlin, Germany.
+Post-quantum cryptography, AI-integrated infrastructure, mobile security.
 
 ## Acknowledgments
 
-- [Open Quantum Safe (OQS)](https://openquantumsafe.org/) for liboqs and the OpenSSL provider
-- [OpenSSL](https://www.openssl.org/) for the TLS foundation
-- NIST for the post-quantum cryptography standardization (FIPS 203, 204)
+Built with:
+
+- [Open Quantum Safe (OQS)](https://openquantumsafe.org/) — liboqs + OpenSSL provider
+- [OpenSSL](https://www.openssl.org/) — TLS 1.3 foundation
+- NIST — post-quantum cryptography standards (FIPS 203, 204)
+- AI-assisted development using Claude (Anthropic), Hermes Agent (Nous Research), and DeepSeek
+
+### AI-Assisted Development
+
+This project was built with the assistance of state-of-the-art AI systems:
+
+- **Claude** (Anthropic) — code generation, security auditing, architecture design
+- **Hermes Agent** (Nous Research) — autonomous multi-agent orchestration, C/C++ vulnerability auditing, systematic debugging
+- **DeepSeek** — reasoning and planning for complex cryptographic implementations
+
+All AI-generated code was reviewed, tested, and validated by the author. The 37-finding security audit that hardened this codebase was performed by an automated C/C++ vulnerability auditing agent running on Hermes.

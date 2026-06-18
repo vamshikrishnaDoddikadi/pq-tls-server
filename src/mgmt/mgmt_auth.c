@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
 #include <openssl/evp.h>
@@ -109,7 +111,7 @@ int mgmt_auth_verify_password(const char *password, const char *stored_hash) {
     {
         char *endptr = NULL;
         long itmp = strtol(stored_hash, &endptr, 10);
-        if (*endptr != '\0' || itmp <= 0) return 0;
+        if (endptr != p1 || itmp <= 0) return 0;
         iterations = (int)itmp;
     }
 
@@ -352,13 +354,119 @@ int mgmt_auth_totp_verify(const char *code, const char *secret_b32) {
             ((unsigned int)(hmac[offset_dt + 3]));
 
         unsigned int totp = binary % 1000000;
-        if ((unsigned long)code_val == totp) return 1;
+        if ((unsigned long)code_val == totp) { OPENSSL_cleanse(key, sizeof(key)); return 1; }
     }
+    OPENSSL_cleanse(key, sizeof(key));
     return 0;
 }
 
 int mgmt_auth_is_totp_enabled(const pq_server_config_t *cfg) {
     return (cfg && cfg->mgmt_totp_secret[0] != '\0');
+}
+
+/* ── Login rate limiter (C-1 fix) ──────────────────────────────────── */
+#define MGMT_LOGIN_MAX_TRACKED 64
+
+typedef struct {
+    char           ip[64];
+    int            fail_count;
+    time_t         first_fail;
+    time_t         blocked_until;
+    int            active;
+} login_tracker_t;
+
+static struct {
+    login_tracker_t entries[MGMT_LOGIN_MAX_TRACKED];
+} login_rl;
+
+int mgmt_auth_login_rate_check(const char *ip, int success) {
+    if (!ip) return 1;
+    time_t now = time(NULL);
+    int slot = -1, free_slot = -1;
+
+    for (int i = 0; i < MGMT_LOGIN_MAX_TRACKED; i++) {
+        if (login_rl.entries[i].active
+            && strncmp(login_rl.entries[i].ip, ip, sizeof(login_rl.entries[i].ip)) == 0) {
+            slot = i; break;
+        }
+        if (!login_rl.entries[i].active && free_slot < 0) free_slot = i;
+    }
+    if (slot < 0 && free_slot >= 0) {
+        slot = free_slot;
+        login_rl.entries[slot].active = 1;
+        snprintf(login_rl.entries[slot].ip, sizeof(login_rl.entries[slot].ip), "%s", ip);
+        login_rl.entries[slot].fail_count = 0;
+        login_rl.entries[slot].first_fail = 0;
+        login_rl.entries[slot].blocked_until = 0;
+    }
+    if (slot < 0) return 1;
+
+    login_tracker_t *e = &login_rl.entries[slot];
+    if (success) { e->fail_count = 0; e->blocked_until = 0; return 1; }
+    if (e->blocked_until > now) return 0;
+    if (e->first_fail == 0 || (now - e->first_fail) > MGMT_LOGIN_WINDOW_SEC) {
+        e->fail_count = 0; e->first_fail = now;
+    }
+    e->fail_count++;
+    if (e->fail_count >= 10) { e->blocked_until = now + MGMT_LOGIN_ESCALATED_SEC; return 0; }
+    if (e->fail_count >= MGMT_LOGIN_MAX_ATTEMPTS) { e->blocked_until = now + MGMT_LOGIN_LOCKOUT_SEC; return 0; }
+    return 1;
+}
+
+/* ── TOTP replay protection (H-6 fix) ─────────────────────────────── */
+#define MGMT_TOTP_REPLAY_SLOTS 8
+
+static struct {
+    uint64_t    counter;
+    unsigned int code;
+    time_t      seen_at;
+    int         active;
+} totp_replay[MGMT_TOTP_REPLAY_SLOTS];
+
+int mgmt_auth_totp_verify_nr(const char *code, const char *secret_b32) {
+    if (!code || !secret_b32) return 0;
+    if (!mgmt_auth_totp_verify(code, secret_b32)) return 0;
+
+    long code_val = strtol(code, NULL, 10);
+    if (code_val < 0 || code_val > 999999) return 0;
+
+    time_t now = time(NULL);
+    for (int i = 0; i < MGMT_TOTP_REPLAY_SLOTS; i++) {
+        if (!totp_replay[i].active) continue;
+        if (now - totp_replay[i].seen_at > MGMT_TOTP_PERIOD * 2) {
+            totp_replay[i].active = 0; continue;
+        }
+        if (totp_replay[i].code == (unsigned int)code_val) return 0;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MGMT_TOTP_REPLAY_SLOTS; i++) {
+        if (!totp_replay[i].active) { slot = i; break; }
+    }
+    if (slot < 0) {
+        slot = 0;
+        time_t oldest = totp_replay[0].seen_at;
+        for (int i = 1; i < MGMT_TOTP_REPLAY_SLOTS; i++) {
+            if (totp_replay[i].seen_at < oldest) { oldest = totp_replay[i].seen_at; slot = i; }
+        }
+    }
+    totp_replay[slot].counter = (uint64_t)now / MGMT_TOTP_PERIOD;
+    totp_replay[slot].code = (unsigned int)code_val;
+    totp_replay[slot].seen_at = now;
+    totp_replay[slot].active = 1;
+    return 1;
+}
+
+/* ── Audit logging (M-13 fix) ────────────────────────────────────── */
+
+void mgmt_auth_audit_log(const char *ip, const char *username, const char *event) {
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm_buf);
+    fprintf(stderr, "[AUDIT %s] ip=%s user=%s event=%s\n",
+            ts, ip ? ip : "?", username ? username : "?", event);
 }
 
 void mgmt_auth_cleanup(void) {

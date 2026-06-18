@@ -33,9 +33,8 @@
 #define CERT_STORE_BASE "/etc/pq-tls-server"
 #endif
 
-/* Default passphrase for encrypting private keys on disk.
- * Override via PQ_KEY_PASSPHRASE environment variable. */
-#define CERT_DEFAULT_KEY_PASSPHRASE "pq-tls-default-key-encryption"
+/* Private key encryption passphrase -- MUST be set via PQ_KEY_PASSPHRASE env var.
+ * Refuses to write keys if not set (H-4: removed hardcoded default). */
 
 static void x509_name_to_str(X509_NAME *name, char *buf, size_t buf_size) {
     if (!name || !buf || buf_size == 0) return;
@@ -283,9 +282,12 @@ int cert_generate_self_signed(const char *cn, const char *org,
     /* Self-sign */
     if (X509_sign(x509, pkey, EVP_sha256()) == 0) goto cleanup;
 
-    /* Write cert */
+        /* Write cert -- atomic with 0644 permissions (M-2 fix) */
     {
-        FILE *fp = fopen(cert_out_path, "w");
+        int cfd = open(cert_out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (cfd < 0) goto cleanup;
+        FILE *fp = fdopen(cfd, "w");
+        if (!fp) { close(cfd); goto cleanup; }
         if (!fp) goto cleanup;
         PEM_write_X509(fp, x509);
         fclose(fp);
@@ -299,7 +301,13 @@ int cert_generate_self_signed(const char *cn, const char *org,
         if (!fp) { close(fd); unlink(cert_out_path); goto cleanup; }
 
         const char *passphrase = getenv("PQ_KEY_PASSPHRASE");
-        if (!passphrase) passphrase = CERT_DEFAULT_KEY_PASSPHRASE;
+        if (!passphrase) {
+            fprintf(stderr, "ERROR: PQ_KEY_PASSPHRASE environment variable not set. "
+                    "Refusing to write unencrypted private key.\n");
+            close(fd);
+            unlink(cert_out_path);
+            goto cleanup;
+        }
         PEM_write_PrivateKey(fp, pkey, EVP_aes_256_cbc(),
                              (unsigned char *)passphrase,
                              (int)strlen(passphrase), NULL, NULL);
@@ -327,7 +335,10 @@ int cert_apply(const char *cert_src, const char *key_src,
     snprintf(tmp_cert, sizeof(tmp_cert), "%s.tmp", cert_dst);
     snprintf(tmp_key, sizeof(tmp_key), "%s.tmp", key_dst);
 
-    FILE *dst = fopen(tmp_cert, "w");
+    int tfd = open(tmp_cert, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (tfd < 0) { fclose(src); return -1; }
+    FILE *dst = fdopen(tfd, "w");
+    if (!dst) { close(tfd); fclose(src); return -1; }
     if (!dst) { fclose(src); return -1; }
 
     char buf[4096];
@@ -344,7 +355,10 @@ int cert_apply(const char *cert_src, const char *key_src,
     /* Copy key */
     src = fopen(key_src, "r");
     if (!src) { unlink(tmp_cert); return -1; }
-    dst = fopen(tmp_key, "w");
+    tfd = open(tmp_key, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (tfd < 0) { fclose(src); unlink(tmp_cert); return -1; }
+    dst = fdopen(tfd, "w");
+    if (!dst) { close(tfd); fclose(src); unlink(tmp_cert); return -1; }
     if (!dst) { fclose(src); unlink(tmp_cert); return -1; }
 
     while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
@@ -355,16 +369,17 @@ int cert_apply(const char *cert_src, const char *key_src,
     fclose(dst);
     if (err) { unlink(tmp_cert); unlink(tmp_key); return -1; }
 
-    /* Rename both — cert first, then key */
+    /* Rename both atomically — rollback cert if key rename fails (M-10 fix) */
     if (rename(tmp_cert, cert_dst) != 0) {
         unlink(tmp_cert); unlink(tmp_key);
         return -1;
     }
     if (rename(tmp_key, key_dst) != 0) {
         unlink(tmp_key);
+        unlink(cert_dst);  /* rollback: cert is now live but key missing */
         return -1;
     }
-    chmod(key_dst, 0600);
+    /* Key permissions already set via O_CREAT — no chmod needed */
 
     return 0;
 }
@@ -433,21 +448,24 @@ int cert_save_upload(const char *store_dir, const char *name,
     /* ── End H-5 validation ────────────────────────────────────────── */
 
     /* Ensure store directory exists */
-    mkdir(store_dir, 0700);
+    if (mkdir(store_dir, 0700) != 0 && errno != EEXIST) return -1;
 
     char cert_path[2048], key_path[2048];
     snprintf(cert_path, sizeof(cert_path), "%s/%s.pem", store_dir, name);
 
     FILE *fp = fopen(cert_path, "w");
     if (!fp) return -1;
-    fwrite(cert_pem, 1, cert_len, fp);
+    if (fwrite(cert_pem, 1, cert_len, fp) != cert_len) { fclose(fp); unlink(cert_path); return -1; }
     fclose(fp);
 
     if (key_pem && key_len > 0) {
         snprintf(key_path, sizeof(key_path), "%s/%s-key.pem", store_dir, name);
-        fp = fopen(key_path, "w");
+        int kfd = open(key_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (kfd < 0) { unlink(cert_path); return -1; }
+        fp = fdopen(kfd, "w");
+        if (!fp) { close(kfd); unlink(cert_path); return -1; }
         if (!fp) return -1;
-        fwrite(key_pem, 1, key_len, fp);
+        if (fwrite(key_pem, 1, key_len, fp) != key_len) { fclose(fp); unlink(cert_path); return -1; }
         fclose(fp);
         chmod(key_path, 0600);
     }

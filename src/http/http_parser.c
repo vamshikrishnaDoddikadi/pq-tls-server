@@ -190,8 +190,8 @@ pq_http_parse_status_t parse_headers(pq_http_request_t *req)
     if (!dot)
         return HTTP_PARSE_ERROR;
 
-    req->version_major = atoi(version_str + 5);
-    req->version_minor = atoi(dot + 1);
+    req->version_major = (int)strtol(version_str + 5, NULL, 10);
+    req->version_minor = (int)strtol(dot + 1, NULL, 10);
 
     if (req->version_major != 1)
         return HTTP_PARSE_ERROR;

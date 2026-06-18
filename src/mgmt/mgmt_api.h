@@ -22,6 +22,7 @@ typedef struct {
     const char         *body;
     size_t              body_len;
     const char         *auth_token;   /* From cookie or Authorization header */
+    char                 client_ip[64]; /* Client IP for rate limiting + audit */
 } mgmt_api_ctx_t;
 
 /**

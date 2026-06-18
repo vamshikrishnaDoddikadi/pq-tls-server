@@ -149,6 +149,7 @@ static void print_help(const char *prog) {
     printf("                       unix:/path/to/sock, host:port;weight=N\n");
     printf("  -g, --groups LIST    TLS key exchange groups\n");
     printf("                       (default: X25519MLKEM768:X25519)\n");
+    printf("  -Q, --require-pq     Require post-quantum key exchange\n");
     printf("  -w, --workers N      Worker threads (0 = auto)\n");
     printf("  -l, --log FILE       Log file (default: stderr)\n");
     printf("  -j, --json-log       Enable structured JSON logging\n");
@@ -191,12 +192,12 @@ static int run_agility(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
         if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--iterations") == 0)
             && i + 1 < argc) {
-            cfg.iterations = atoi(argv[++i]);
+            { long v = strtol(argv[++i], NULL, 10); if (v > 0) cfg.iterations = (int)v; }
             if (cfg.iterations <= 0) cfg.iterations = 1000;
         }
         else if ((strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--warmup") == 0)
             && i + 1 < argc) {
-            cfg.warmup_iterations = atoi(argv[++i]);
+            { long v = strtol(argv[++i], NULL, 10); if (v >= 0) cfg.warmup_iterations = (int)v; }
         }
         else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             cfg.verbose = 1;
@@ -281,7 +282,7 @@ static int run_benchmark(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
         if ((strcmp(argv[i], "--iterations") == 0 || strcmp(argv[i], "-n") == 0)
             && i + 1 < argc) {
-            iterations = atoi(argv[++i]);
+            { long v = strtol(argv[++i], NULL, 10); if (v > 0) iterations = (int)v; }
             if (iterations <= 0) iterations = 1000;
         }
         else if ((strcmp(argv[i], "--format") == 0) && i + 1 < argc) {
@@ -359,16 +360,23 @@ int main(int argc, char **argv) {
     pq_server_config_defaults(&config);
 
     /* First pass: find --config/-f to load config file first */
+    int config_loaded = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--config") == 0)
             && i + 1 < argc) {
             if (pq_server_config_load(&config, argv[i + 1]) != 0) {
                 return 1;
             }
-            /* Store config file path for save-back by management UI */
             snprintf(config.config_file_path, sizeof(config.config_file_path), "%s", argv[i + 1]);
+            config_loaded = 1;
             break;
         }
+    }
+    /* Auto-load default config if none specified */
+    if (!config_loaded) {
+        pq_server_config_load(&config, "/etc/pq-tls-server.conf");
+        snprintf(config.config_file_path, sizeof(config.config_file_path),
+                 "/etc/pq-tls-server.conf");
     }
 
     /* Second pass: CLI args override config file */

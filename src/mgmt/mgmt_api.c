@@ -71,7 +71,7 @@ static void send_json_with_cookie(int fd, const char *json, const char *token) {
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
-        "Set-Cookie: mgmt_token=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d\r\n"
+        "Set-Cookie: mgmt_token=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n\r\n",
         strlen(json), token, MGMT_SESSION_TTL_SEC);
@@ -111,6 +111,14 @@ void mgmt_api_auth_login(mgmt_api_ctx_t *ctx) {
         return;
     }
 
+    /* ── Rate limiting (C-1 fix) ── */
+    if (!mgmt_auth_login_rate_check(ctx->client_ip, 0)) {
+        mgmt_auth_audit_log(ctx->client_ip, username, "LOGIN_BLOCKED");
+        send_error(ctx->client_fd, "429 Too Many Requests",
+                   "Too many login attempts — try again later");
+        return;
+    }
+
     /* Always verify password to prevent timing side-channel on username */
     int pw_valid = mgmt_auth_verify_password(password, ctx->config->mgmt_admin_pass_hash);
     /* Constant-time username compare */
@@ -119,20 +127,26 @@ void mgmt_api_auth_login(mgmt_api_ctx_t *ctx) {
     int user_valid = (ulen == stored_ulen) &&
                      (CRYPTO_memcmp(username, ctx->config->mgmt_admin_user, ulen) == 0);
     if (!user_valid || !pw_valid) {
+        mgmt_auth_audit_log(ctx->client_ip, username, "LOGIN_FAIL");
         send_error(ctx->client_fd, "401 Unauthorized", "Invalid credentials");
         return;
     }
 
-    /* TOTP 2FA — if configured, require a valid TOTP code */
+    /* TOTP 2FA — if configured, require a valid TOTP code with replay protection */
     if (mgmt_auth_is_totp_enabled(ctx->config)) {
         char totp_code[8] = {0};
         if (json_extract_string(ctx->body, "totp_code", totp_code, sizeof(totp_code)) != 0
-            || !mgmt_auth_totp_verify(totp_code, ctx->config->mgmt_totp_secret)) {
+            || !mgmt_auth_totp_verify_nr(totp_code, ctx->config->mgmt_totp_secret)) {
+            mgmt_auth_audit_log(ctx->client_ip, username, "TOTP_FAIL");
             send_error(ctx->client_fd, "401 Unauthorized",
                        "Invalid TOTP code — 2FA is required");
             return;
         }
     }
+
+    /* Successful login — record in rate limiter and audit */
+    mgmt_auth_login_rate_check(ctx->client_ip, 1);
+    mgmt_auth_audit_log(ctx->client_ip, username, "LOGIN_SUCCESS");
 
     char token[MGMT_TOKEN_HEX_LEN + 1];
     if (mgmt_auth_create_session(username, token) != 0) {
@@ -209,9 +223,11 @@ void mgmt_api_auth_setup(mgmt_api_ctx_t *ctx) {
     snprintf(ctx->config->mgmt_admin_pass_hash, sizeof(ctx->config->mgmt_admin_pass_hash), "%s", hash);
     ctx->config->mgmt_enabled = 1;
 
-    /* Save config */
+    /* Save config — use default path if none set */
     if (ctx->config_path && ctx->config_path[0]) {
         pq_server_config_save(ctx->config, ctx->config_path);
+    } else {
+        pq_server_config_save(ctx->config, "/etc/pq-tls-server.conf");
     }
 
     /* Create session */

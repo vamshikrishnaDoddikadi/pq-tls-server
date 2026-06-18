@@ -68,7 +68,7 @@ static int parse_upstream(const char *str, pq_upstream_t *u) {
         *semi = '\0';
         char *wstr = strstr(semi + 1, "weight=");
         if (wstr) {
-            u->weight = atoi(wstr + 7);
+            { long v = strtol(wstr + 7, NULL, 10); if (v > 0) u->weight = (int)v; }
             if (u->weight < 1) u->weight = 1;
             if (u->weight > 100) u->weight = 100;
         }
@@ -84,7 +84,7 @@ static int parse_upstream(const char *str, pq_upstream_t *u) {
         if (hlen >= sizeof(u->host)) hlen = sizeof(u->host) - 1;
         memcpy(u->host, buf, hlen);
         u->host[hlen] = '\0';
-        u->port = (uint16_t)atoi(colon + 1);
+        { long v = strtol(colon + 1, NULL, 10); if (v > 0 && v <= 65535) u->port = (uint16_t)v; }
     }
     return 0;
 }
@@ -98,6 +98,7 @@ void pq_server_config_defaults(pq_server_config_t *cfg) {
     safe_copy(cfg->bind_address, "0.0.0.0", sizeof(cfg->bind_address));
     cfg->listen_port = 8443;
     safe_copy(cfg->tls_groups, "X25519MLKEM768:X25519", sizeof(cfg->tls_groups));
+    cfg->require_pq = 0;
     cfg->tls_min_version = 0x0304; /* TLS 1.3 */
     cfg->session_cache_size = 20000; /* Enable by default */
     cfg->upstream_timeout_ms = 30000;
@@ -154,7 +155,7 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
             if (strcmp(key, "address") == 0)
                 safe_copy(cfg->bind_address, val, sizeof(cfg->bind_address));
             else if (strcmp(key, "port") == 0)
-                cfg->listen_port = (uint16_t)atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0 && v <= 65535) cfg->listen_port = (uint16_t)v; }
         }
         /* -- [tls] section -- */
         else if (strcmp(section, "tls") == 0) {
@@ -173,7 +174,7 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
                 else if (strcmp(val, "1.3") == 0)  cfg->tls_min_version = 0x0304;
             }
             else if (strcmp(key, "session_cache_size") == 0)
-                cfg->session_cache_size = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v >= 0) cfg->session_cache_size = (int)v; }
         }
         /* -- [upstream] section -- */
         else if (strcmp(section, "upstream") == 0) {
@@ -182,16 +183,16 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
                 cfg->upstream_count++;
             }
             else if (strcmp(key, "timeout") == 0)
-                cfg->upstream_timeout_ms = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0) cfg->upstream_timeout_ms = (int)v; }
             else if (strcmp(key, "connect_timeout") == 0)
-                cfg->upstream_connect_timeout_ms = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0) cfg->upstream_connect_timeout_ms = (int)v; }
         }
         /* -- [server] section -- */
         else if (strcmp(section, "server") == 0) {
             if (strcmp(key, "workers") == 0)
-                cfg->worker_threads = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0) cfg->worker_threads = (int)v; }
             else if (strcmp(key, "max_connections") == 0)
-                cfg->max_connections = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0) cfg->max_connections = (int)v; }
             else if (strcmp(key, "daemonize") == 0)
                 cfg->daemonize = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
             else if (strcmp(key, "pid_file") == 0)
@@ -215,14 +216,14 @@ int pq_server_config_load(pq_server_config_t *cfg, const char *path) {
         /* -- [health] section -- */
         else if (strcmp(section, "health") == 0) {
             if (strcmp(key, "port") == 0)
-                cfg->health_port = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v > 0 && v <= 65535) cfg->health_port = (int)v; }
         }
         /* -- [rate_limit] section -- */
         else if (strcmp(section, "rate_limit") == 0) {
             if (strcmp(key, "per_ip") == 0)
-                cfg->rate_limit_per_ip = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v >= 0) cfg->rate_limit_per_ip = (int)v; }
             else if (strcmp(key, "burst") == 0)
-                cfg->rate_limit_burst = atoi(val);
+                { long v = strtol(val, NULL, 10); if (v >= 0) cfg->rate_limit_burst = (int)v; }
         }
         /* -- [acl] section -- */
         else if (strcmp(section, "acl") == 0) {
@@ -275,6 +276,7 @@ int pq_server_config_parse_args(pq_server_config_t *cfg, int argc, char **argv) 
         {"config",         required_argument, NULL, 'f'},
         {"health-port",    required_argument, NULL, 'H'},
         {"groups",         required_argument, NULL, 'g'},
+        {"require-pq",      no_argument,       NULL, 'Q'},
         {"rate-limit",     required_argument, NULL, 'R'},
         {"json-log",       no_argument,       NULL, 'j'},
         {"session-cache",  required_argument, NULL, 'S'},
@@ -284,10 +286,10 @@ int pq_server_config_parse_args(pq_server_config_t *cfg, int argc, char **argv) 
 
     optind = 1;
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:c:k:a:b:w:l:vdf:H:g:R:jS:h",
+    while ((opt = getopt_long(argc, argv, "p:c:k:a:b:w:l:vdf:H:g:R:jS:hQ",
                               long_opts, NULL)) != -1) {
         switch (opt) {
-        case 'p': cfg->listen_port = (uint16_t)atoi(optarg); break;
+        case 'p': { long v = strtol(optarg, NULL, 10); if (v > 0 && v <= 65535) cfg->listen_port = (uint16_t)v; break; }
         case 'c': safe_copy(cfg->cert_file, optarg, sizeof(cfg->cert_file)); break;
         case 'k': safe_copy(cfg->key_file, optarg, sizeof(cfg->key_file)); break;
         case 'a': safe_copy(cfg->ca_file, optarg, sizeof(cfg->ca_file)); break;
@@ -297,21 +299,22 @@ int pq_server_config_parse_args(pq_server_config_t *cfg, int argc, char **argv) 
                 cfg->upstream_count++;
             }
             break;
-        case 'w': cfg->worker_threads = atoi(optarg); break;
+        case 'w': { long v = strtol(optarg, NULL, 10); if (v > 0) cfg->worker_threads = (int)v; break; }
         case 'l': safe_copy(cfg->log_file, optarg, sizeof(cfg->log_file)); break;
         case 'v': cfg->verbose = 1; cfg->log_level = 0; break;
         case 'd': cfg->daemonize = 1; break;
         case 'f':
             /* config file — already loaded before arg parsing */
             break;
-        case 'H': cfg->health_port = atoi(optarg); break;
+        case 'H': { long v = strtol(optarg, NULL, 10); if (v > 0 && v <= 65535) cfg->health_port = (int)v; break; }
         case 'g': safe_copy(cfg->tls_groups, optarg, sizeof(cfg->tls_groups)); break;
-        case 'R': cfg->rate_limit_per_ip = atoi(optarg);
+        case 'Q': cfg->require_pq = 1; break;
+        case 'R': { long v = strtol(optarg, NULL, 10); if (v >= 0) cfg->rate_limit_per_ip = (int)v; }
                   if (cfg->rate_limit_burst == 0)
                       cfg->rate_limit_burst = cfg->rate_limit_per_ip * 2;
                   break;
         case 'j': cfg->json_logging = 1; break;
-        case 'S': cfg->session_cache_size = atoi(optarg); break;
+        case 'S': { long v = strtol(optarg, NULL, 10); if (v >= 0) cfg->session_cache_size = (int)v; break; }
         case 'h':
             return 1; /* signal caller to print help */
         default:

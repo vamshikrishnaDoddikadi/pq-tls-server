@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -189,7 +190,7 @@ static void extract_body(const char *req, ssize_t total_len,
     }
 }
 
-static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *config) {
+static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *config, const char *client_ip) {
     char req[65536];
     ssize_t total = 0;
 
@@ -315,8 +316,9 @@ static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *c
             .path = path,       /* Full path with query string for param extraction */
             .body = body,
             .body_len = body_len,
-            .auth_token = token[0] ? token : NULL
+            .auth_token = token[0] ? token : NULL,
         };
+        snprintf(api_ctx.client_ip, sizeof(api_ctx.client_ip), "%s", client_ip);
 
         if (mgmt_api_dispatch(&api_ctx)) {
             /* Log stream endpoints manage their own fd lifecycle */
@@ -386,10 +388,15 @@ static void* mgmt_thread_fn(void *arg) {
         int ret = poll(&pfd, 1, 1000);
         if (ret <= 0) continue;
 
-        int cfd = accept(fd, NULL, NULL);
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+        int cfd = accept(fd, (struct sockaddr*)&peer, &peer_len);
         if (cfd < 0) continue;
 
-        handle_request(cfd, g_mgr, g_config);
+        char client_ip[64] = "unknown";
+        inet_ntop(AF_INET, &peer.sin_addr, client_ip, sizeof(client_ip));
+
+        handle_request(cfd, g_mgr, g_config, client_ip);
     }
 
     /* Cleanup */

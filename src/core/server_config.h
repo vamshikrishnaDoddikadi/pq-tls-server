@@ -54,6 +54,7 @@ typedef struct {
     char      ca_file[PQ_MAX_PATH];
     int       require_client_auth;
     char      tls_groups[PQ_MAX_GROUPS];  /* e.g. "X25519MLKEM768:X25519" */
+    int       require_pq;                 /* Fail if PQ unavailable (C-2/H-3) */
     int       tls_min_version;            /* 0x0303=TLS1.2, 0x0304=TLS1.3 */
     int       session_cache_size;         /* 0 = disabled, >0 = cache size */
 

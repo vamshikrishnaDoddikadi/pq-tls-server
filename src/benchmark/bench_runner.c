@@ -62,9 +62,9 @@ int main(int argc, char **argv)
     int opt;
     while ((opt = getopt(argc, argv, "n:w:c:o:j:p:a:vh")) != -1) {
         switch (opt) {
-            case 'n': cfg.iterations = atoi(optarg); break;
-            case 'w': cfg.warmup_iterations = atoi(optarg); break;
-            case 'c': cfg.cpu_pin = atoi(optarg); break;
+            case 'n': { long v = strtol(optarg, NULL, 10); if (v > 0) cfg.iterations = (int)v; break; }
+            case 'w': { long v = strtol(optarg, NULL, 10); if (v >= 0) cfg.warmup_iterations = (int)v; break; }
+            case 'c': { long v = strtol(optarg, NULL, 10); if (v >= 0) cfg.cpu_pin = (int)v; break; }
             case 'o': csv_file = optarg; break;
             case 'j': json_file = optarg; break;
             case 'p': plugin_dir = optarg; break;

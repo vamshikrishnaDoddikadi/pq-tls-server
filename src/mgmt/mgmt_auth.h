@@ -88,5 +88,37 @@ int mgmt_auth_is_totp_enabled(const pq_server_config_t *cfg);
  * Clean up all sessions.
  */
 void mgmt_auth_cleanup(void);
+/* ── Login rate limiter (C-1 fix) ────────────────────────────────── */
+#define MGMT_LOGIN_MAX_ATTEMPTS   5    /* max failures before lockout */
+#define MGMT_LOGIN_WINDOW_SEC    60    /* tracking window */
+#define MGMT_LOGIN_LOCKOUT_SEC  300    /* lockout duration */
+#define MGMT_LOGIN_ESCALATED_SEC 900   /* escalated lockout after 10 failures */
+
+/**
+ * Check if a login attempt from this IP should be allowed.
+ * Also records the attempt for rate limiting.
+ * @param ip       Client IP address
+ * @param success  1 if login succeeded, 0 if failed
+ * @return 1 if allowed, 0 if rate-limited
+ */
+int mgmt_auth_login_rate_check(const char *ip, int success);
+
+/* ── TOTP replay protection (H-6 fix) ───────────────────────────── */
+
+/**
+ * Check TOTP code with replay protection.
+ * Same as mgmt_auth_totp_verify but rejects replayed codes.
+ */
+int mgmt_auth_totp_verify_nr(const char *code, const char *secret_b32);
+
+/* ── Audit logging (M-13 fix) ───────────────────────────────────── */
+
+/**
+ * Log an authentication event.
+ * @param ip        Client IP
+ * @param username  Attempted username
+ * @param event     "LOGIN_SUCCESS", "LOGIN_FAIL", "LOGIN_BLOCKED", "TOTP_FAIL"
+ */
+void mgmt_auth_audit_log(const char *ip, const char *username, const char *event);
 
 #endif /* PQ_MGMT_AUTH_H */
