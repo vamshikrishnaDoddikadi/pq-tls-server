@@ -130,8 +130,9 @@ int pq_hex_encode(const uint8_t *data, size_t data_len,
         return PQ_ERR_NULL_POINTER;
     }
     
-    /* Check buffer size: need 2 chars per byte plus null terminator */
-    if (hex_str_len < (data_len * 2 + 1)) {
+    /* Check buffer size: need 2 chars per byte plus null terminator
+     * (written so that data_len * 2 + 1 cannot overflow) */
+    if (data_len > (SIZE_MAX - 1) / 2 || hex_str_len < (data_len * 2 + 1)) {
         return PQ_ERR_BUFFER_TOO_SMALL;
     }
     

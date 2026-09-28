@@ -125,6 +125,42 @@ size_t pq_kem_sharedsecret_bytes(int algorithm) {
 }
 
 /* ========================================================================
+ * liboqs backend check
+ * ======================================================================== */
+
+/**
+ * @brief Create an OQS_KEM for @p algorithm and verify its sizes
+ *
+ * Callers size their buffers from the PQ_KEM_* constants in pq_kem.h.  If the
+ * linked liboqs ever reports different sizes (e.g. a future parameter change
+ * or a mismatched shared library), writing into those buffers would overflow
+ * them, so refuse to operate instead.
+ *
+ * @return OQS_KEM instance (free with OQS_KEM_free), or NULL
+ */
+static OQS_KEM *pq_kem_new_checked(int algorithm) {
+    const char *alg_name = pq_kem_algorithm_name(algorithm);
+    if (alg_name == NULL) {
+        return NULL;
+    }
+
+    OQS_KEM *kem = OQS_KEM_new(alg_name);
+    if (kem == NULL) {
+        return NULL;
+    }
+
+    if (kem->length_public_key != pq_kem_publickey_bytes(algorithm) ||
+        kem->length_secret_key != pq_kem_secretkey_bytes(algorithm) ||
+        kem->length_ciphertext != pq_kem_ciphertext_bytes(algorithm) ||
+        kem->length_shared_secret != pq_kem_sharedsecret_bytes(algorithm)) {
+        OQS_KEM_free(kem);
+        return NULL;
+    }
+
+    return kem;
+}
+
+/* ========================================================================
  * ML-KEM Core Operations
  * ======================================================================== */
 
@@ -145,14 +181,13 @@ int pq_kem_keypair(int algorithm, uint8_t *pk, uint8_t *sk) {
         return PQ_ERR_NULL_POINTER;
     }
     
-    /* Get algorithm name for liboqs */
-    const char *alg_name = pq_kem_algorithm_name(algorithm);
-    if (alg_name == NULL) {
+    /* Validate algorithm identifier */
+    if (pq_kem_algorithm_name(algorithm) == NULL) {
         return PQ_ERR_INVALID_ALGORITHM;
     }
     
-    /* Initialize OQS KEM context */
-    OQS_KEM *kem = OQS_KEM_new(alg_name);
+    /* Initialize OQS KEM context (sizes verified against pq_kem.h) */
+    OQS_KEM *kem = pq_kem_new_checked(algorithm);
     if (kem == NULL) {
         return PQ_ERR_CRYPTO_FAILED;
     }
@@ -190,14 +225,13 @@ int pq_kem_encapsulate(int algorithm, uint8_t *ct, uint8_t *ss, const uint8_t *p
         return PQ_ERR_NULL_POINTER;
     }
     
-    /* Get algorithm name for liboqs */
-    const char *alg_name = pq_kem_algorithm_name(algorithm);
-    if (alg_name == NULL) {
+    /* Validate algorithm identifier */
+    if (pq_kem_algorithm_name(algorithm) == NULL) {
         return PQ_ERR_INVALID_ALGORITHM;
     }
     
-    /* Initialize OQS KEM context */
-    OQS_KEM *kem = OQS_KEM_new(alg_name);
+    /* Initialize OQS KEM context (sizes verified against pq_kem.h) */
+    OQS_KEM *kem = pq_kem_new_checked(algorithm);
     if (kem == NULL) {
         return PQ_ERR_CRYPTO_FAILED;
     }
@@ -235,14 +269,13 @@ int pq_kem_decapsulate(int algorithm, uint8_t *ss, const uint8_t *ct, const uint
         return PQ_ERR_NULL_POINTER;
     }
     
-    /* Get algorithm name for liboqs */
-    const char *alg_name = pq_kem_algorithm_name(algorithm);
-    if (alg_name == NULL) {
+    /* Validate algorithm identifier */
+    if (pq_kem_algorithm_name(algorithm) == NULL) {
         return PQ_ERR_INVALID_ALGORITHM;
     }
     
-    /* Initialize OQS KEM context */
-    OQS_KEM *kem = OQS_KEM_new(alg_name);
+    /* Initialize OQS KEM context (sizes verified against pq_kem.h) */
+    OQS_KEM *kem = pq_kem_new_checked(algorithm);
     if (kem == NULL) {
         return PQ_ERR_CRYPTO_FAILED;
     }

@@ -12,16 +12,20 @@
 
 #include "pq_sig.h"
 #include "pq_errors.h"
+#include "kem_classical.h"   /* raw P-256 key helpers (EVP_PKEY_fromdata based) */
 #include <oqs/oqs.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
-#include <openssl/ec.h>
 #include <openssl/x509.h>
 #include <openssl/rsa.h>
-#include <openssl/param_build.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+_Static_assert(PQ_SIG_ECDSA_P256_PUBLICKEY_BYTES == PQ_P256_PUBLICKEY_BYTES,
+               "P-256 public key size mismatch");
+_Static_assert(PQ_SIG_ECDSA_P256_SECRETKEY_BYTES == PQ_P256_SECRETKEY_BYTES,
+               "P-256 secret key size mismatch");
 
 /* ========================================================================
  * Algorithm Name Mapping
@@ -165,11 +169,30 @@ size_t pq_sig_signature_bytes(int algorithm) {
  * ML-DSA (liboqs) Implementation
  * ======================================================================== */
 
-static int pq_sig_keypair_mldsa(int algorithm, uint8_t *pk, uint8_t *sk) {
+/**
+ * @brief OQS_SIG_new() plus a check that liboqs's sizes match pq_sig.h
+ *
+ * Callers size buffers from the PQ_SIG_MLDSA* constants; if the linked
+ * liboqs ever disagrees, operating would overflow those buffers.
+ */
+static OQS_SIG *pq_sig_new_checked(int algorithm) {
     const char *alg_name = pq_sig_algorithm_name(algorithm);
-    if (!alg_name) return PQ_ERR_INVALID_ALGORITHM;
-    
+    if (!alg_name) return NULL;
+
     OQS_SIG *sig = OQS_SIG_new(alg_name);
+    if (!sig) return NULL;
+
+    if (sig->length_public_key != pq_sig_publickey_bytes(algorithm) ||
+        sig->length_secret_key != pq_sig_secretkey_bytes(algorithm) ||
+        sig->length_signature != pq_sig_signature_bytes(algorithm)) {
+        OQS_SIG_free(sig);
+        return NULL;
+    }
+    return sig;
+}
+
+static int pq_sig_keypair_mldsa(int algorithm, uint8_t *pk, uint8_t *sk) {
+    OQS_SIG *sig = pq_sig_new_checked(algorithm);
     if (!sig) return PQ_ERR_CRYPTO_FAILED;
     
     OQS_STATUS status = OQS_SIG_keypair(sig, pk, sk);
@@ -184,38 +207,33 @@ static int pq_sig_keypair_mldsa(int algorithm, uint8_t *pk, uint8_t *sk) {
     return PQ_SUCCESS;
 }
 
-static int pq_sig_sign_mldsa(int algorithm, uint8_t *sig, size_t *sig_len,
+static int pq_sig_sign_mldsa(int algorithm, uint8_t *sig, size_t capacity, size_t *out_len,
                              const uint8_t *msg, size_t msg_len, const uint8_t *sk) {
-    const char *alg_name = pq_sig_algorithm_name(algorithm);
-    if (!alg_name) return PQ_ERR_INVALID_ALGORITHM;
-    
-    OQS_SIG *oqs_sig = OQS_SIG_new(alg_name);
+    OQS_SIG *oqs_sig = pq_sig_new_checked(algorithm);
     if (!oqs_sig) return PQ_ERR_CRYPTO_FAILED;
     
-    size_t max_sig_len = oqs_sig->length_signature;
-    OQS_STATUS status = OQS_SIG_sign(oqs_sig, sig, sig_len, msg, msg_len, sk);
+    /* liboqs writes up to length_signature bytes and ignores *out_len on input */
+    if (capacity < oqs_sig->length_signature) {
+        OQS_SIG_free(oqs_sig);
+        return PQ_ERR_BUFFER_TOO_SMALL;
+    }
+    
+    size_t len = 0;
+    OQS_STATUS status = OQS_SIG_sign(oqs_sig, sig, &len, msg, msg_len, sk);
+    size_t max_len = oqs_sig->length_signature;
     OQS_SIG_free(oqs_sig);
 
-    /* Check result and clear signature buffer on error.
-     * Use max_sig_len rather than *sig_len which may be 0 or
-     * undefined after a failed sign operation. */
-    if (status != OQS_SUCCESS) {
-        if (sig) {
-            OPENSSL_cleanse(sig, max_sig_len);
-        }
-        if (sig_len) *sig_len = 0;
+    if (status != OQS_SUCCESS || len == 0 || len > max_len) {
         return PQ_ERR_SIGNATURE_FAILED;
     }
     
+    *out_len = len;
     return PQ_SUCCESS;
 }
 
 static int pq_sig_verify_mldsa(int algorithm, const uint8_t *msg, size_t msg_len,
                                const uint8_t *sig, size_t sig_len, const uint8_t *pk) {
-    const char *alg_name = pq_sig_algorithm_name(algorithm);
-    if (!alg_name) return PQ_ERR_INVALID_ALGORITHM;
-    
-    OQS_SIG *oqs_sig = OQS_SIG_new(alg_name);
+    OQS_SIG *oqs_sig = pq_sig_new_checked(algorithm);
     if (!oqs_sig) return PQ_ERR_CRYPTO_FAILED;
     
     OQS_STATUS status = OQS_SIG_verify(oqs_sig, msg, msg_len, sig, sig_len, pk);
@@ -225,297 +243,136 @@ static int pq_sig_verify_mldsa(int algorithm, const uint8_t *msg, size_t msg_len
 }
 
 /* ========================================================================
+ * Generic EVP sign / verify helpers
+ * ======================================================================== */
+
+/* md == NULL for Ed25519 (one-shot, no pre-hash) */
+static int evp_sign(EVP_PKEY *pkey, const EVP_MD *md,
+                    uint8_t *sig, size_t capacity, size_t *out_len,
+                    const uint8_t *msg, size_t msg_len) {
+    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    size_t len = capacity;   /* EVP_DigestSign treats *siglen as the buffer size */
+    int rc = PQ_ERR_SIGNATURE_FAILED;
+
+    if (!md_ctx) return PQ_ERR_MEMORY_ALLOCATION;
+    if (EVP_DigestSignInit(md_ctx, NULL, md, NULL, pkey) <= 0) goto done;
+    if (EVP_DigestSign(md_ctx, sig, &len, msg, msg_len) <= 0) goto done;
+    if (len == 0 || len > capacity) goto done;
+    *out_len = len;
+    rc = PQ_SUCCESS;
+
+done:
+    EVP_MD_CTX_free(md_ctx);
+    return rc;
+}
+
+static int evp_verify(EVP_PKEY *pkey, const EVP_MD *md,
+                      const uint8_t *sig, size_t sig_len,
+                      const uint8_t *msg, size_t msg_len) {
+    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    int rc = PQ_ERR_VERIFICATION_FAILED;
+
+    if (!md_ctx) return PQ_ERR_MEMORY_ALLOCATION;
+    if (EVP_DigestVerifyInit(md_ctx, NULL, md, NULL, pkey) <= 0) {
+        rc = PQ_ERR_CRYPTO_FAILED;
+        goto done;
+    }
+    if (EVP_DigestVerify(md_ctx, sig, sig_len, msg, msg_len) == 1) rc = PQ_SUCCESS;
+
+done:
+    EVP_MD_CTX_free(md_ctx);
+    return rc;
+}
+
+/* ========================================================================
  * Ed25519 (OpenSSL) Implementation
  * ======================================================================== */
 
 static int pq_sig_keypair_ed25519(uint8_t *pk, uint8_t *sk) {
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
-    if (!ctx) return PQ_ERR_CRYPTO_FAILED;
-    
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
     EVP_PKEY *pkey = NULL;
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
+    size_t pk_len = PQ_SIG_ED25519_PUBLICKEY_BYTES, sk_len = PQ_SIG_ED25519_SECRETKEY_BYTES;
+    int rc = PQ_ERR_KEY_GENERATION_FAILED;
+
+    if (!ctx) return PQ_ERR_CRYPTO_FAILED;
+    if (EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) goto done;
+
     /* Extract raw keys (32 bytes each for Ed25519) */
-    size_t pk_len = 32, sk_len = 32;
     if (EVP_PKEY_get_raw_public_key(pkey, pk, &pk_len) <= 0 ||
-        EVP_PKEY_get_raw_private_key(pkey, sk, &sk_len) <= 0) {
-        OPENSSL_cleanse(sk, 32);  /* Clear any partial key data */
-        EVP_PKEY_free(pkey);
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
+        pk_len != PQ_SIG_ED25519_PUBLICKEY_BYTES) goto done;
+    if (EVP_PKEY_get_raw_private_key(pkey, sk, &sk_len) <= 0 ||
+        sk_len != PQ_SIG_ED25519_SECRETKEY_BYTES) goto done;
+    rc = PQ_SUCCESS;
+
+done:
+    if (rc != PQ_SUCCESS) OPENSSL_cleanse(sk, PQ_SIG_ED25519_SECRETKEY_BYTES);
     EVP_PKEY_free(pkey);
     EVP_PKEY_CTX_free(ctx);
-    return PQ_SUCCESS;
+    return rc;
 }
 
-static int pq_sig_sign_ed25519(uint8_t *sig, size_t *sig_len,
+static int pq_sig_sign_ed25519(uint8_t *sig, size_t capacity, size_t *out_len,
                                const uint8_t *msg, size_t msg_len,
                                const uint8_t *sk) {
-    /* Create EVP_PKEY from raw private key */
-    EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, sk, 32);
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, sk,
+                                                  PQ_SIG_ED25519_SECRETKEY_BYTES);
     if (!pkey) return PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create signing context */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Initialize signing (Ed25519 uses NULL for digest) */
-    if (EVP_DigestSignInit(md_ctx, NULL, NULL, NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Sign message */
-    if (EVP_DigestSign(md_ctx, sig, sig_len, msg, msg_len) <= 0) {
-        if (sig && sig_len) {
-            OPENSSL_cleanse(sig, *sig_len);  /* Clear any partial signature */
-        }
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_SIGNATURE_FAILED;
-    }
-    
-    EVP_MD_CTX_free(md_ctx);
+
+    int rc = evp_sign(pkey, NULL, sig, capacity, out_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    return PQ_SUCCESS;
+    if (rc == PQ_SUCCESS && *out_len != PQ_SIG_ED25519_SIGNATURE_BYTES)
+        rc = PQ_ERR_SIGNATURE_FAILED;
+    return rc;
 }
 
 static int pq_sig_verify_ed25519(const uint8_t *msg, size_t msg_len,
                                  const uint8_t *sig, size_t sig_len,
                                  const uint8_t *pk) {
-    /* Create EVP_PKEY from raw public key */
-    EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, pk, 32);
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, pk,
+                                                 PQ_SIG_ED25519_PUBLICKEY_BYTES);
     if (!pkey) return PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create verification context */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Initialize verification (Ed25519 uses NULL for digest) */
-    if (EVP_DigestVerifyInit(md_ctx, NULL, NULL, NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Verify signature */
-    int result = EVP_DigestVerify(md_ctx, sig, sig_len, msg, msg_len);
-    
-    EVP_MD_CTX_free(md_ctx);
+
+    int rc = evp_verify(pkey, NULL, sig, sig_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    
-    return (result == 1) ? PQ_SUCCESS : PQ_ERR_VERIFICATION_FAILED;
+    return rc;
 }
 
 /* ========================================================================
  * ECDSA P-256 (OpenSSL) Implementation
+ *
+ * Raw keys: pk = uncompressed point (65 bytes), sk = 32-byte scalar.
+ * Built with EVP_PKEY_fromdata / OSSL_PARAM (kem_classical.c helpers);
+ * no deprecated EC_KEY APIs.
  * ======================================================================== */
 
 static int pq_sig_keypair_ecdsa_p256(uint8_t *pk, uint8_t *sk) {
-    /* Create EC key generation context */
-    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-    if (!ctx) return PQ_ERR_CRYPTO_FAILED;
-    
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Set curve to P-256 */
-    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Generate key pair */
-    EVP_PKEY *pkey = NULL;
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Extract public key (uncompressed format: 0x04 || X || Y = 65 bytes) */
-    size_t pk_len = 65;
-    if (EVP_PKEY_get_raw_public_key(pkey, pk, &pk_len) <= 0) {
-        /* Fallback: use EC_POINT encoding */
-        EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(pkey);
-        if (!ec_key) {
-            EVP_PKEY_free(pkey);
-            EVP_PKEY_CTX_free(ctx);
-            return PQ_ERR_CRYPTO_FAILED;
-        }
-        
-        const EC_GROUP *group = EC_KEY_get0_group(ec_key);
-        const EC_POINT *point = EC_KEY_get0_public_key(ec_key);
-        pk_len = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED,
-                                     pk, 65, NULL);
-        EC_KEY_free(ec_key);
-        
-        if (pk_len != 65) {
-            EVP_PKEY_free(pkey);
-            EVP_PKEY_CTX_free(ctx);
-            return PQ_ERR_CRYPTO_FAILED;
-        }
-    }
-    
-    /* Extract private key (32 bytes) */
-    size_t sk_len = 32;
-    if (EVP_PKEY_get_raw_private_key(pkey, sk, &sk_len) <= 0) {
-        /* Fallback: use EC_KEY encoding */
-        EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(pkey);
-        if (!ec_key) {
-            EVP_PKEY_free(pkey);
-            EVP_PKEY_CTX_free(ctx);
-            return PQ_ERR_CRYPTO_FAILED;
-        }
-        
-        const BIGNUM *priv_bn = EC_KEY_get0_private_key(ec_key);
-        if (!priv_bn || BN_bn2binpad(priv_bn, sk, 32) != 32) {
-            EC_KEY_free(ec_key);
-            EVP_PKEY_free(pkey);
-            EVP_PKEY_CTX_free(ctx);
-            return PQ_ERR_CRYPTO_FAILED;
-        }
-        EC_KEY_free(ec_key);
-    }
-    
-    EVP_PKEY_free(pkey);
-    EVP_PKEY_CTX_free(ctx);
-    return PQ_SUCCESS;
+    return pq_p256_generate_raw(pk, sk);
 }
 
-static int pq_sig_sign_ecdsa_p256(uint8_t *sig, size_t *sig_len,
+static int pq_sig_sign_ecdsa_p256(uint8_t *sig, size_t capacity, size_t *out_len,
                                   const uint8_t *msg, size_t msg_len,
                                   const uint8_t *sk) {
-    /* Create EC key from private key bytes */
-    EC_KEY *ec_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!ec_key) return PQ_ERR_CRYPTO_FAILED;
-    
-    BIGNUM *priv_bn = BN_bin2bn(sk, 32, NULL);
-    if (!priv_bn || !EC_KEY_set_private_key(ec_key, priv_bn)) {
-        BN_free(priv_bn);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
+    EVP_PKEY *pkey = NULL;
+    int rc = pq_p256_pkey_from_private(sk, &pkey);
+    if (rc != PQ_SUCCESS) return PQ_ERR_CRYPTO_FAILED;
 
-    /* Derive public key from private key (must happen before freeing priv_bn) */
-    const EC_GROUP *group = EC_KEY_get0_group(ec_key);
-    EC_POINT *pub_point = EC_POINT_new(group);
-    if (!pub_point || !EC_POINT_mul(group, pub_point, priv_bn, NULL, NULL, NULL)) {
-        BN_free(priv_bn);
-        EC_POINT_free(pub_point);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    BN_free(priv_bn);
-    EC_KEY_set_public_key(ec_key, pub_point);
-    EC_POINT_free(pub_point);
-    
-    /* Create EVP_PKEY from EC_KEY */
-    EVP_PKEY *pkey = EVP_PKEY_new();
-    if (!pkey || !EVP_PKEY_assign_EC_KEY(pkey, ec_key)) {
-        EVP_PKEY_free(pkey);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    /* ec_key is now owned by pkey, don't free separately */
-    
-    /* Create signing context with SHA-256 */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    if (EVP_DigestSignInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Sign message */
-    if (EVP_DigestSign(md_ctx, sig, sig_len, msg, msg_len) <= 0) {
-        if (sig && sig_len) {
-            OPENSSL_cleanse(sig, *sig_len);  /* Clear any partial signature */
-        }
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_SIGNATURE_FAILED;
-    }
-    
-    EVP_MD_CTX_free(md_ctx);
+    rc = evp_sign(pkey, EVP_sha256(), sig, capacity, out_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    return PQ_SUCCESS;
+    return rc;
 }
 
 static int pq_sig_verify_ecdsa_p256(const uint8_t *msg, size_t msg_len,
                                     const uint8_t *sig, size_t sig_len,
                                     const uint8_t *pk) {
-    /* Create EC key from public key bytes (uncompressed format) */
-    EC_KEY *ec_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!ec_key) return PQ_ERR_CRYPTO_FAILED;
-    
-    const EC_GROUP *group = EC_KEY_get0_group(ec_key);
-    EC_POINT *pub_point = EC_POINT_new(group);
-    if (!pub_point || !EC_POINT_oct2point(group, pub_point, pk, 65, NULL)) {
-        EC_POINT_free(pub_point);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    if (!EC_KEY_set_public_key(ec_key, pub_point)) {
-        EC_POINT_free(pub_point);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    EC_POINT_free(pub_point);
-    
-    /* Create EVP_PKEY from EC_KEY */
-    EVP_PKEY *pkey = EVP_PKEY_new();
-    if (!pkey || !EVP_PKEY_assign_EC_KEY(pkey, ec_key)) {
-        EVP_PKEY_free(pkey);
-        EC_KEY_free(ec_key);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    /* ec_key is now owned by pkey */
-    
-    /* Create verification context with SHA-256 */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    if (EVP_DigestVerifyInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Verify signature */
-    int result = EVP_DigestVerify(md_ctx, sig, sig_len, msg, msg_len);
-    
-    EVP_MD_CTX_free(md_ctx);
+    EVP_PKEY *pkey = NULL;
+    /* Validates encoding and that the point is on the curve */
+    int rc = pq_p256_pkey_from_public(pk, &pkey);
+    if (rc != PQ_SUCCESS) return PQ_ERR_VERIFICATION_FAILED;
+
+    rc = evp_verify(pkey, EVP_sha256(), sig, sig_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    
-    return (result == 1) ? PQ_SUCCESS : PQ_ERR_VERIFICATION_FAILED;
+    return rc;
 }
 
 /* ========================================================================
@@ -523,96 +380,54 @@ static int pq_sig_verify_ecdsa_p256(const uint8_t *msg, size_t msg_len,
  * ======================================================================== */
 
 static int pq_sig_keypair_rsa2048(uint8_t *pk, uint8_t *sk) {
-    /* Create RSA key generation context */
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-    if (!ctx) return PQ_ERR_CRYPTO_FAILED;
-    
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Set key size to 2048 bits */
-    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Generate key pair */
     EVP_PKEY *pkey = NULL;
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
+    unsigned char *pk_der = NULL, *sk_der = NULL;
+    int pk_len = 0, sk_len = 0;
+    int rc = PQ_ERR_KEY_GENERATION_FAILED;
+
+    if (!ctx) return PQ_ERR_CRYPTO_FAILED;
+    if (EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0) goto done;
+    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) goto done;
     
     /* Serialize keys to DER format */
-    unsigned char *pk_der = NULL, *sk_der = NULL;
-    int pk_len = i2d_PUBKEY(pkey, &pk_der);
-    int sk_len = i2d_PrivateKey(pkey, &sk_der);
-    
-    if (pk_len <= 0 || sk_len <= 0 || 
+    pk_len = i2d_PUBKEY(pkey, &pk_der);
+    sk_len = i2d_PrivateKey(pkey, &sk_der);
+    if (pk_len <= 0 || sk_len <= 0 ||
         pk_len > (int)PQ_SIG_RSA2048_PUBLICKEY_BYTES ||
         sk_len > (int)PQ_SIG_RSA2048_SECRETKEY_BYTES) {
-        OPENSSL_free(pk_der);
-        OPENSSL_free(sk_der);
-        EVP_PKEY_free(pkey);
-        EVP_PKEY_CTX_free(ctx);
-        return PQ_ERR_CRYPTO_FAILED;
+        goto done;
     }
     
-    /* Copy to output buffers */
-    memcpy(pk, pk_der, pk_len);
-    memcpy(sk, sk_der, sk_len);
-    
-    /* Zero remaining space */
-    if (pk_len < (int)PQ_SIG_RSA2048_PUBLICKEY_BYTES) {
-        memset(pk + pk_len, 0, PQ_SIG_RSA2048_PUBLICKEY_BYTES - pk_len);
-    }
-    if (sk_len < (int)PQ_SIG_RSA2048_SECRETKEY_BYTES) {
-        memset(sk + sk_len, 0, PQ_SIG_RSA2048_SECRETKEY_BYTES - sk_len);
-    }
-    
+    /* Copy to output buffers and zero the remaining space */
+    memcpy(pk, pk_der, (size_t)pk_len);
+    memcpy(sk, sk_der, (size_t)sk_len);
+    memset(pk + pk_len, 0, PQ_SIG_RSA2048_PUBLICKEY_BYTES - (size_t)pk_len);
+    memset(sk + sk_len, 0, PQ_SIG_RSA2048_SECRETKEY_BYTES - (size_t)sk_len);
+    rc = PQ_SUCCESS;
+
+done:
     OPENSSL_free(pk_der);
-    OPENSSL_free(sk_der);
+    /* The private key DER must be wiped, not just freed */
+    if (sk_der) OPENSSL_clear_free(sk_der, sk_len > 0 ? (size_t)sk_len : 0);
+    if (rc != PQ_SUCCESS) OPENSSL_cleanse(sk, PQ_SIG_RSA2048_SECRETKEY_BYTES);
     EVP_PKEY_free(pkey);
     EVP_PKEY_CTX_free(ctx);
-    return PQ_SUCCESS;
+    return rc;
 }
 
-static int pq_sig_sign_rsa2048(uint8_t *sig, size_t *sig_len,
+static int pq_sig_sign_rsa2048(uint8_t *sig, size_t capacity, size_t *out_len,
                                const uint8_t *msg, size_t msg_len,
                                const uint8_t *sk) {
-    /* Parse private key from DER format */
+    /* Parse private key from DER format (trailing zero padding is ignored) */
     const unsigned char *sk_ptr = sk;
     EVP_PKEY *pkey = d2i_PrivateKey(EVP_PKEY_RSA, NULL, &sk_ptr, PQ_SIG_RSA2048_SECRETKEY_BYTES);
     if (!pkey) return PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create signing context with SHA-256 */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    if (EVP_DigestSignInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Sign message */
-    if (EVP_DigestSign(md_ctx, sig, sig_len, msg, msg_len) <= 0) {
-        if (sig && sig_len) {
-            OPENSSL_cleanse(sig, *sig_len);  /* Clear any partial signature */
-        }
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_SIGNATURE_FAILED;
-    }
-    
-    EVP_MD_CTX_free(md_ctx);
+
+    int rc = evp_sign(pkey, EVP_sha256(), sig, capacity, out_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    return PQ_SUCCESS;
+    return rc;
 }
 
 static int pq_sig_verify_rsa2048(const uint8_t *msg, size_t msg_len,
@@ -622,27 +437,10 @@ static int pq_sig_verify_rsa2048(const uint8_t *msg, size_t msg_len,
     const unsigned char *pk_ptr = pk;
     EVP_PKEY *pkey = d2i_PUBKEY(NULL, &pk_ptr, PQ_SIG_RSA2048_PUBLICKEY_BYTES);
     if (!pkey) return PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create verification context with SHA-256 */
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    if (!md_ctx) {
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    if (EVP_DigestVerifyInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) <= 0) {
-        EVP_MD_CTX_free(md_ctx);
-        EVP_PKEY_free(pkey);
-        return PQ_ERR_CRYPTO_FAILED;
-    }
-    
-    /* Verify signature */
-    int result = EVP_DigestVerify(md_ctx, sig, sig_len, msg, msg_len);
-    
-    EVP_MD_CTX_free(md_ctx);
+
+    int rc = evp_verify(pkey, EVP_sha256(), sig, sig_len, msg, msg_len);
     EVP_PKEY_free(pkey);
-    
-    return (result == 1) ? PQ_SUCCESS : PQ_ERR_VERIFICATION_FAILED;
+    return rc;
 }
 
 /* ========================================================================
@@ -706,25 +504,54 @@ int pq_sig_sign(int algorithm, uint8_t *sig, size_t *sig_len,
         return PQ_ERR_NULL_POINTER;
     }
     
+    size_t max_len = pq_sig_signature_bytes(algorithm);
+    if (max_len == 0) {
+        return PQ_ERR_INVALID_ALGORITHM;
+    }
+    
+    /* *sig_len carries the buffer capacity on input */
+    size_t capacity = *sig_len;
+    if (capacity < max_len) {
+        *sig_len = 0;
+        return PQ_ERR_BUFFER_TOO_SMALL;
+    }
+    
+    size_t out_len = 0;
+    int rc;
+    
     /* Dispatch to appropriate implementation */
     switch (algorithm) {
         /* ML-DSA (Post-Quantum) */
         case PQ_SIG_MLDSA44:
         case PQ_SIG_MLDSA65:
         case PQ_SIG_MLDSA87:
-            return pq_sig_sign_mldsa(algorithm, sig, sig_len, msg, msg_len, sk);
+            rc = pq_sig_sign_mldsa(algorithm, sig, capacity, &out_len, msg, msg_len, sk);
+            break;
         
         /* Classical Fallbacks */
         case PQ_SIG_ED25519:
-            return pq_sig_sign_ed25519(sig, sig_len, msg, msg_len, sk);
+            rc = pq_sig_sign_ed25519(sig, capacity, &out_len, msg, msg_len, sk);
+            break;
         case PQ_SIG_ECDSA_P256:
-            return pq_sig_sign_ecdsa_p256(sig, sig_len, msg, msg_len, sk);
+            rc = pq_sig_sign_ecdsa_p256(sig, capacity, &out_len, msg, msg_len, sk);
+            break;
         case PQ_SIG_RSA2048:
-            return pq_sig_sign_rsa2048(sig, sig_len, msg, msg_len, sk);
+            rc = pq_sig_sign_rsa2048(sig, capacity, &out_len, msg, msg_len, sk);
+            break;
         
         default:
             return PQ_ERR_INVALID_ALGORITHM;
     }
+    
+    if (rc != PQ_SUCCESS) {
+        /* Clear any partial signature (bounded by the known maximum) */
+        OPENSSL_cleanse(sig, max_len);
+        *sig_len = 0;
+        return rc;
+    }
+    
+    *sig_len = out_len;
+    return PQ_SUCCESS;
 }
 
 /**
@@ -766,4 +593,51 @@ int pq_sig_verify(int algorithm, const uint8_t *msg, size_t msg_len,
         default:
             return PQ_ERR_INVALID_ALGORITHM;
     }
+}
+
+/* ========================================================================
+ * Self test
+ * ======================================================================== */
+
+int pq_sig_self_test(int algorithm) {
+    size_t pk_size = pq_sig_publickey_bytes(algorithm);
+    size_t sk_size = pq_sig_secretkey_bytes(algorithm);
+    size_t sig_size = pq_sig_signature_bytes(algorithm);
+    if (pk_size == 0 || sk_size == 0 || sig_size == 0) {
+        return PQ_ERR_INVALID_ALGORITHM;
+    }
+    
+    /* ML-DSA: the backend must exist and agree with our size constants */
+    if (algorithm == PQ_SIG_MLDSA44 || algorithm == PQ_SIG_MLDSA65 ||
+        algorithm == PQ_SIG_MLDSA87) {
+        OQS_SIG *probe = pq_sig_new_checked(algorithm);
+        if (!probe) return PQ_ERR_ALGORITHM_NOT_AVAILABLE;
+        OQS_SIG_free(probe);
+    }
+    
+    static const uint8_t msg[] = "pq-tls signature self-test";
+    uint8_t *pk = malloc(pk_size);
+    uint8_t *sk = malloc(sk_size);
+    uint8_t *sig = malloc(sig_size);
+    size_t sig_len = sig_size;
+    int rc = PQ_ERR_MEMORY_ALLOCATION;
+    
+    if (pk && sk && sig) {
+        rc = pq_sig_keypair(algorithm, pk, sk);
+        if (rc == PQ_SUCCESS)
+            rc = pq_sig_sign(algorithm, sig, &sig_len, msg, sizeof(msg) - 1, sk);
+        if (rc == PQ_SUCCESS)
+            rc = pq_sig_verify(algorithm, msg, sizeof(msg) - 1, sig, sig_len, pk);
+        if (rc == PQ_SUCCESS) {
+            sig[sig_len / 2] ^= 0x01;
+            if (pq_sig_verify(algorithm, msg, sizeof(msg) - 1, sig, sig_len, pk) == PQ_SUCCESS)
+                rc = PQ_ERR_CRYPTO_FAILED;  /* tampered signature accepted */
+        }
+    }
+    
+    if (sk) OPENSSL_cleanse(sk, sk_size);
+    free(sk);
+    free(pk);
+    free(sig);
+    return rc;
 }

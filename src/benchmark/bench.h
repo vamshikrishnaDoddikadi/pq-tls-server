@@ -24,7 +24,9 @@ typedef enum {
  * Run the full benchmark suite and print results.
  * @param iterations  Number of iterations per test
  * @param format      Output format
- * @return 0 on success
+ * Every operation is checked: the run aborts on the first failing
+ * operation, KEM shared-secret mismatch or signature that does not verify.
+ * @return 0 on success, non-zero if any benchmark failed
  */
 int pq_bench_run(int iterations, pq_bench_format_t format);
 

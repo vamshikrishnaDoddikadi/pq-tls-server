@@ -296,7 +296,7 @@ TEST(registry_filter_by_level)
     pq_registry_t *reg = pq_registry_create();
     pq_registry_register_builtins(reg);
 
-    const pq_kem_provider_t *results[32];
+    const pq_kem_provider_t *results[32] = {0};
     size_t n = pq_registry_filter_kems_by_level(reg, 3, results, 32);
     assert(n >= 2); /* At least ML-KEM-768 and ML-KEM-1024 */
 
@@ -311,7 +311,7 @@ TEST(registry_filter_by_family)
     pq_registry_t *reg = pq_registry_create();
     pq_registry_register_builtins(reg);
 
-    const pq_kem_provider_t *results[32];
+    const pq_kem_provider_t *results[32] = {0};
     size_t n = pq_registry_filter_kems_by_family(reg, PQ_ALG_FAMILY_LATTICE, results, 32);
     assert(n == 3); /* ML-KEM-512, 768, 1024 */
 
@@ -342,10 +342,11 @@ TEST(registry_preference_ordering)
     pq_registry_t *reg = pq_registry_create();
     pq_registry_register_builtins(reg);
 
+    /* Preference order must be reflected in the generated TLS group list
+     * (only entries with a real TLS codepoint appear in it). */
     const char *prefs[] = {
-        "X25519MLKEM1024",
-        "X25519MLKEM768",
         "X25519",
+        "X25519MLKEM768",
         NULL
     };
     assert(pq_registry_set_kem_preference(reg, prefs) == PQ_SUCCESS);
@@ -353,12 +354,15 @@ TEST(registry_preference_ordering)
     char buf[512];
     int len = pq_registry_generate_groups_string(reg, buf, sizeof(buf));
     assert(len > 0);
+    assert(strncmp(buf, "X25519:", 7) == 0);
+    char *pos_classical = strstr(buf, "X25519");
+    char *pos_hybrid    = strstr(buf, "X25519MLKEM768");
+    assert(pos_classical != NULL && pos_hybrid != NULL);
+    assert(pos_classical < pos_hybrid);
 
-    /* Verify ordering: 1024 should come before 768 */
-    char *pos1024 = strstr(buf, "X25519MLKEM1024");
-    char *pos768  = strstr(buf, "X25519MLKEM768");
-    assert(pos1024 != NULL && pos768 != NULL);
-    assert(pos1024 < pos768);
+    /* Unknown names are rejected */
+    const char *bad[] = { "X25519MLKEM1024-does-not-exist", NULL };
+    assert(pq_registry_set_kem_preference(reg, bad) != PQ_SUCCESS);
 
     pq_registry_destroy(reg);
 }

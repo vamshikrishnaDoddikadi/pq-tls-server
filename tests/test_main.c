@@ -21,6 +21,8 @@ int run_tls_policy_tests(void);
 int run_hpack_tests(void);
 int run_graceful_drain_tests(void);
 int run_master_worker_tests(void);
+int run_crypto_hpke_tests(void);
+int run_crypto_provider_tests(void);
 
 typedef struct {
     const char *name;
@@ -39,6 +41,8 @@ static const test_suite_t suites[] = {
     { "HPACK",              run_hpack_tests },
     { "Graceful Drain",     run_graceful_drain_tests },
     { "Master/Worker",      run_master_worker_tests },
+    { "Crypto: HPKE",       run_crypto_hpke_tests },
+    { "Crypto: Providers",  run_crypto_provider_tests },
 };
 
 int main(void) {

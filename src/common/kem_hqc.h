@@ -9,6 +9,11 @@
  * architecture by demonstrating a non-lattice algorithm can be added
  * without changing core code.
  *
+ * Sizes are NOT compile-time constants: metadata() reports the sizes of the
+ * linked liboqs (HQC was renamed/resized across liboqs releases), and all
+ * sizes are 0 and is_available() is false when liboqs was built without
+ * HQC.  Always check is_available() and allocate from metadata().
+ *
  * Can be compiled as either:
  *   - Built-in: linked directly into the server
  *   - Plugin: compiled as a .so and loaded at runtime via the registry

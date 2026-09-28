@@ -6,28 +6,38 @@
  */
 
 #include "pq_utils.h"
+#include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <time.h>
 
-/* Global logging state */
+/* Global logging state.  All access goes through log_mutex so that
+ * pq_log() is safe to call from multiple worker threads concurrently with
+ * pq_log_init()/pq_log_cleanup(), and so that lines are not interleaved. */
 static struct {
     FILE *log_file;
     log_level_t level;
     int initialized;
 } log_state = {NULL, LOG_INFO, 0};
 
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* Logging functions */
 void pq_log_init(const char *log_file, log_level_t level) {
+    pthread_mutex_lock(&log_mutex);
+
     if (log_state.initialized) {
+        pthread_mutex_unlock(&log_mutex);
         return;
     }
 
     if (log_file) {
         log_state.log_file = fopen(log_file, "w");
         if (!log_state.log_file) {
+            pthread_mutex_unlock(&log_mutex);
             fprintf(stderr, "Failed to open log file: %s\n", log_file);
             return;
         }
@@ -37,25 +47,37 @@ void pq_log_init(const char *log_file, log_level_t level) {
 
     log_state.level = level;
     log_state.initialized = 1;
+    pthread_mutex_unlock(&log_mutex);
 }
 
 void pq_log(log_level_t level, const char *format, ...) {
-    if (!log_state.initialized || level < log_state.level) {
-        return;
-    }
-
-    FILE *out = log_state.log_file ? log_state.log_file : stderr;
-
     static const char *level_str[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
     static const int level_count = sizeof(level_str) / sizeof(level_str[0]);
+
+    if (!format) {
+        return;
+    }
 
     /* Bounds check to prevent out-of-range array access */
     const char *lstr = ((int)level >= 0 && (int)level < level_count) ? level_str[level] : "UNKNOWN";
 
+    /* localtime_r(): localtime() returns a pointer to shared static storage
+     * and is not thread-safe. */
+    char time_buf[64] = "0000-00-00 00:00:00";
     time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char time_buf[64];
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    struct tm tm_info;
+    if (localtime_r(&now, &tm_info) != NULL) {
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_info);
+    }
+
+    pthread_mutex_lock(&log_mutex);
+
+    if (!log_state.initialized || level < log_state.level) {
+        pthread_mutex_unlock(&log_mutex);
+        return;
+    }
+
+    FILE *out = log_state.log_file ? log_state.log_file : stderr;
 
     fprintf(out, "[%s] [%s] ", time_buf, lstr);
 
@@ -66,14 +88,18 @@ void pq_log(log_level_t level, const char *format, ...) {
 
     fprintf(out, "\n");
     fflush(out);
+
+    pthread_mutex_unlock(&log_mutex);
 }
 
 void pq_log_cleanup(void) {
+    pthread_mutex_lock(&log_mutex);
     if (log_state.log_file && log_state.log_file != stderr) {
         fclose(log_state.log_file);
     }
     log_state.initialized = 0;
     log_state.log_file = NULL;
+    pthread_mutex_unlock(&log_mutex);
 }
 
 /* Timer functions */
@@ -215,27 +241,53 @@ const char* pq_error_message(pq_error_t *error) {
 }
 
 /* Byte utilities */
+
+/* Lower-case hex encoding via a lookup table (no sprintf; SECURITY-ASSESSMENT H-7).
+ * hex_str must have room for 2 * len + 1 bytes. */
 void pq_bytes_to_hex(const uint8_t *bytes, size_t len, char *hex_str) {
+    static const char hex_digits[16] = {
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
+
     if (!bytes || !hex_str) {
         return;
     }
     for (size_t i = 0; i < len; i++) {
-        sprintf(hex_str + i * 2, "%02x", bytes[i]);
+        hex_str[2 * i]     = hex_digits[bytes[i] >> 4];
+        hex_str[2 * i + 1] = hex_digits[bytes[i] & 0x0F];
     }
     hex_str[len * 2] = '\0';
 }
 
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Strict decoder: returns the number of bytes written, or -1 if the input is
+ * NULL, has odd length, contains a non-hex character, or does not fit. */
 int pq_hex_to_bytes(const char *hex_str, uint8_t *bytes, size_t max_len) {
     if (!hex_str || !bytes) {
         return -1;
     }
-    size_t len = strlen(hex_str) / 2;
-    if (len > max_len) {
+    size_t hex_len = strlen(hex_str);
+    if (hex_len % 2 != 0) {
+        return -1;
+    }
+    size_t len = hex_len / 2;
+    if (len > max_len || len > (size_t)INT_MAX) {
         return -1;
     }
     for (size_t i = 0; i < len; i++) {
-        char byte_str[3] = {hex_str[i * 2], hex_str[i * 2 + 1], '\0'};
-        bytes[i] = (uint8_t)strtol(byte_str, NULL, 16);
+        int hi = hex_nibble(hex_str[2 * i]);
+        int lo = hex_nibble(hex_str[2 * i + 1]);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        bytes[i] = (uint8_t)((hi << 4) | lo);
     }
-    return len;
+    return (int)len;
 }

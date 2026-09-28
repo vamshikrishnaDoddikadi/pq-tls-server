@@ -254,6 +254,8 @@ add_executable(pq-tls-tests
     tests/test_hpack.c
     tests/test_graceful_drain.c
     tests/test_master_worker.c   # #includes src/core/master_worker.c itself
+    tests/test_crypto_hpke.c      # links pq_common (see below)
+    tests/test_crypto_providers.c # links pq_common (see below)
     # Dependencies for the modules under test
     src/http/http_parser.c
     src/http/conn_pool.c
@@ -281,6 +283,7 @@ target_include_directories(pq-tls-tests PRIVATE
 )
 
 target_link_libraries(pq-tls-tests PRIVATE
+    pq_common            # crypto library under test (test_crypto_*.c)
     Threads::Threads
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -291,6 +294,18 @@ set_target_properties(pq-tls-tests PROPERTIES
 )
 
 add_test(NAME pq-tls-tests COMMAND pq-tls-tests)
+
+# Crypto-agility registry tests (standalone runner with its own main)
+add_executable(pq-tls-registry-tests tests/test_crypto_registry.c)
+target_include_directories(pq-tls-registry-tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/common
+    ${OQS_INCLUDE_DIR}
+)
+target_link_libraries(pq-tls-registry-tests PRIVATE pq_common Threads::Threads)
+set_target_properties(pq-tls-registry-tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+add_test(NAME pq-tls-registry-tests COMMAND pq-tls-registry-tests)
 
 # =========================================================================
 # Install

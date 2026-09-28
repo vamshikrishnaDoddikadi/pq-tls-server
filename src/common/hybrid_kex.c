@@ -9,10 +9,11 @@
  */
 
 #include "hybrid_kex.h"
+#include "hybrid_combiner.h"
+#include "kem_classical.h"
 #include "pq_kem.h"
 #include "pq_errors.h"
 #include <openssl/evp.h>
-#include <openssl/ec.h>
 #include <openssl/crypto.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,9 +28,18 @@
 #define X25519_SHAREDSECRET_BYTES 32
 
 /* ECDH P-256 sizes */
-#define P256_PUBLICKEY_BYTES    65  /* Uncompressed point: 0x04 || x || y */
-#define P256_SECRETKEY_BYTES    32
-#define P256_SHAREDSECRET_BYTES 32
+#define P256_PUBLICKEY_BYTES    PQ_P256_PUBLICKEY_BYTES   /* 0x04 || x || y */
+#define P256_SECRETKEY_BYTES    PQ_P256_SECRETKEY_BYTES
+#define P256_SHAREDSECRET_BYTES PQ_P256_SHAREDSECRET_BYTES
+
+/* Largest classical sizes (used for stack buffers) */
+#define CLASSICAL_MAX_PK  P256_PUBLICKEY_BYTES
+#define CLASSICAL_MAX_SK  P256_SECRETKEY_BYTES
+#define CLASSICAL_MAX_SS  P256_SHAREDSECRET_BYTES
+
+/* Output size of both combination modes */
+#define HYBRID_SS_BYTES   32
+#define PQ_SS_BYTES       32
 
 /* ========================================================================
  * Helper Functions - Classical Algorithm Sizes
@@ -82,310 +92,154 @@ static size_t get_classical_ss_size(int classical_alg) {
  * ======================================================================== */
 
 /**
- * @brief Generate X25519 key pair
+ * @brief Generate X25519 key pair (sk wiped on failure)
  */
 static int x25519_keypair(uint8_t *pk, uint8_t *sk) {
     EVP_PKEY *pkey = NULL;
-    EVP_PKEY_CTX *ctx = NULL;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
     size_t pk_len = X25519_PUBLICKEY_BYTES;
     size_t sk_len = X25519_SECRETKEY_BYTES;
-    int ret = PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create key generation context */
-    ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
-    if (!ctx) {
-        goto cleanup;
-    }
-    
-    /* Generate key pair */
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        goto cleanup;
-    }
-    
-    /* Extract public key */
-    if (EVP_PKEY_get_raw_public_key(pkey, pk, &pk_len) <= 0) {
-        goto cleanup;
-    }
-    
-    /* Extract secret key */
-    if (EVP_PKEY_get_raw_private_key(pkey, sk, &sk_len) <= 0) {
-        goto cleanup;
-    }
-    
+    int ret = PQ_ERR_KEY_GENERATION_FAILED;
+
+    if (!ctx) goto cleanup;
+    if (EVP_PKEY_keygen_init(ctx) <= 0) goto cleanup;
+    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) goto cleanup;
+    if (EVP_PKEY_get_raw_public_key(pkey, pk, &pk_len) <= 0 ||
+        pk_len != X25519_PUBLICKEY_BYTES) goto cleanup;
+    if (EVP_PKEY_get_raw_private_key(pkey, sk, &sk_len) <= 0 ||
+        sk_len != X25519_SECRETKEY_BYTES) goto cleanup;
     ret = PQ_SUCCESS;
-    
+
 cleanup:
-    if (pkey) EVP_PKEY_free(pkey);
-    if (ctx) EVP_PKEY_CTX_free(ctx);
+    if (ret != PQ_SUCCESS) OPENSSL_cleanse(sk, X25519_SECRETKEY_BYTES);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    return ret;
+}
+
+/**
+ * @brief Recompute the X25519 public key from a secret key
+ */
+static int x25519_public_from_private(const uint8_t *sk, uint8_t *pk) {
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, sk,
+                                                  X25519_SECRETKEY_BYTES);
+    size_t pk_len = X25519_PUBLICKEY_BYTES;
+    int ret = PQ_ERR_CRYPTO_FAILED;
+
+    if (pkey && EVP_PKEY_get_raw_public_key(pkey, pk, &pk_len) == 1 &&
+        pk_len == X25519_PUBLICKEY_BYTES)
+        ret = PQ_SUCCESS;
+    EVP_PKEY_free(pkey);
     return ret;
 }
 
 /**
  * @brief Derive X25519 shared secret
+ *
+ * SECURITY: OpenSSL's X25519 derive fails when the result is all-zero, i.e.
+ * for the identity / low-order peer points; the explicit check below makes
+ * that rejection independent of the OpenSSL version.  CWE-295
  */
 static int x25519_derive(uint8_t *ss, const uint8_t *sk, const uint8_t *peer_pk) {
-    EVP_PKEY *pkey = NULL;
-    EVP_PKEY *peer = NULL;
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, sk,
+                                                  X25519_SECRETKEY_BYTES);
+    EVP_PKEY *peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer_pk,
+                                                 X25519_PUBLICKEY_BYTES);
     EVP_PKEY_CTX *ctx = NULL;
     size_t ss_len = X25519_SHAREDSECRET_BYTES;
     int ret = PQ_ERR_CRYPTO_FAILED;
-    
-    /* Load our secret key */
-    pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, sk, X25519_SECRETKEY_BYTES);
-    if (!pkey) {
-        goto cleanup;
-    }
-    
-    /* Load peer's public key */
-    peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer_pk, X25519_PUBLICKEY_BYTES);
-    if (!peer) {
-        goto cleanup;
-    }
 
-    /* SECURITY: Reject all-zero and small-subgroup public keys for X25519.
-     * While OpenSSL clamps low-order points during scalar multiplication,
-     * an all-zero shared secret (e.g., from a zero public key) would make
-     * the hybrid security rely solely on the PQ component. We proactively
-     * reject known small-order points and the identity element.
-     * CWE-295 */
-    {
-        /* Check for all-zero public key (identity element) */
-        int all_zero = 1;
-        for (size_t i = 0; i < X25519_PUBLICKEY_BYTES; i++) {
-            if (peer_pk[i] != 0) {
-                all_zero = 0;
-                break;
-            }
-        }
-        if (all_zero) {
-            EVP_PKEY_free(peer);
-            peer = NULL;
-            ret = PQ_ERR_CRYPTO_FAILED;
-            goto cleanup;
-        }
-
-        /* Check for the known low-order point on X25519:
-         * The 5 low-order points are: (0,0), (1,0), (x,0) where x =
-         * 26959946667150639794667015087019630673557916260026308143510066298881,
-         * and their inverses. The simplest check is the all-zero point
-         * (the identity) which we already checked above, plus checking
-         * that the public key produces a non-zero shared secret after
-         * clamping. OpenSSL's EVP_PKEY_derive will handle most of this,
-         * but we reject the obvious identity element early. */
-    }
-    
-    /* Derive shared secret */
+    if (!pkey || !peer) goto cleanup;
     ctx = EVP_PKEY_CTX_new(pkey, NULL);
-    if (!ctx) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive_set_peer(ctx, peer) <= 0) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive(ctx, ss, &ss_len) <= 0) {
-        goto cleanup;
-    }
-    
+    if (!ctx) goto cleanup;
+    if (EVP_PKEY_derive_init(ctx) <= 0) goto cleanup;
+    if (EVP_PKEY_derive_set_peer(ctx, peer) <= 0) goto cleanup;
+    if (EVP_PKEY_derive(ctx, ss, &ss_len) <= 0 ||
+        ss_len != X25519_SHAREDSECRET_BYTES) goto cleanup;
+
+    uint8_t acc = 0;
+    for (size_t i = 0; i < X25519_SHAREDSECRET_BYTES; i++) acc |= ss[i];
+    if (acc == 0) goto cleanup;
+
     ret = PQ_SUCCESS;
-    
+
 cleanup:
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    if (peer) EVP_PKEY_free(peer);
-    if (pkey) EVP_PKEY_free(pkey);
+    if (ret != PQ_SUCCESS) OPENSSL_cleanse(ss, X25519_SHAREDSECRET_BYTES);
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(peer);
+    EVP_PKEY_free(pkey);
     return ret;
 }
 
+/* ========================================================================
+ * Classical dispatch (ECDH P-256 via kem_classical.c raw-key helpers,
+ * which use EVP_PKEY_fromdata / OSSL_PARAM and validate peer points)
+ * ======================================================================== */
+
+static int classical_keypair(int alg, uint8_t *pk, uint8_t *sk) {
+    switch (alg) {
+        case HYBRID_CLASSICAL_X25519: return x25519_keypair(pk, sk);
+        case HYBRID_CLASSICAL_P256:   return pq_p256_generate_raw(pk, sk);
+        default:                      return PQ_ERR_INVALID_PARAMETER;
+    }
+}
+
+static int classical_derive(int alg, uint8_t *ss, const uint8_t *sk, const uint8_t *peer_pk) {
+    switch (alg) {
+        case HYBRID_CLASSICAL_X25519: return x25519_derive(ss, sk, peer_pk);
+        case HYBRID_CLASSICAL_P256:   return pq_p256_ecdh_raw(sk, peer_pk, ss);
+        default:                      return PQ_ERR_INVALID_PARAMETER;
+    }
+}
+
+static int classical_public_from_private(int alg, const uint8_t *sk, uint8_t *pk) {
+    switch (alg) {
+        case HYBRID_CLASSICAL_X25519: return x25519_public_from_private(sk, pk);
+        case HYBRID_CLASSICAL_P256:   return pq_p256_public_from_private(sk, pk);
+        default:                      return PQ_ERR_INVALID_PARAMETER;
+    }
+}
 
 /* ========================================================================
- * ECDH P-256 Operations
+ * Shared secret combination
  * ======================================================================== */
 
 /**
- * @brief Generate ECDH P-256 key pair
+ * @brief Combine the component secrets according to the hybrid mode
+ *
+ * CONCAT: ss = SHA3-256(pq_ss || classical_ss || classical_ct || classical_pk || label)
+ *         label = "pq-tls/hybrid-kex/v2" || I2OSP(classical_alg,1) || I2OSP(pq_alg,1)
+ *         Every hashed field has a fixed length for a given (classical, pq)
+ *         pair and every label has the same length with a unique 2-byte
+ *         suffix, so the encoding is injective across all supported suites.
+ * XOR:    deprecated, insecure; see hybrid_kex.h.
  */
-static int p256_keypair(uint8_t *pk, uint8_t *sk) {
-    EVP_PKEY *pkey = NULL;
-    EVP_PKEY_CTX *pctx = NULL;
-    EC_KEY *ec_key = NULL;
-    const EC_GROUP *group = NULL;
-    const EC_POINT *pub_point = NULL;
-    const BIGNUM *priv_bn = NULL;
-    int ret = PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create P-256 key generation context */
-    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-    if (!pctx) {
-        goto cleanup;
+static int combine_secrets(const pq_hybrid_kex_t *kex,
+                           const uint8_t *classical_ss, size_t classical_ss_len,
+                           const uint8_t *pq_ss,
+                           const uint8_t *classical_ct, size_t classical_ct_len,
+                           const uint8_t *classical_pk, size_t classical_pk_len,
+                           uint8_t *ss) {
+    if (kex->mode == HYBRID_MODE_CONCAT) {
+        static const char prefix[] = "pq-tls/hybrid-kex/v2";
+        uint8_t label[sizeof(prefix) - 1 + 2];
+        memcpy(label, prefix, sizeof(prefix) - 1);
+        label[sizeof(prefix) - 1] = (uint8_t)kex->classical_alg;
+        label[sizeof(prefix)] = (uint8_t)kex->pq_alg;
+        return pq_combiner_xwing_style(pq_ss, PQ_SS_BYTES,
+                                       classical_ss, classical_ss_len,
+                                       classical_ct, classical_ct_len,
+                                       classical_pk, classical_pk_len,
+                                       label, sizeof(label), ss);
     }
-    
-    if (EVP_PKEY_keygen_init(pctx) <= 0) {
-        goto cleanup;
+    if (kex->mode == HYBRID_MODE_XOR) {
+        /* DEPRECATED / INSECURE: kept for configuration compatibility only */
+        if (classical_ss_len != HYBRID_SS_BYTES) return PQ_ERR_INVALID_PARAMETER;
+        for (size_t i = 0; i < HYBRID_SS_BYTES; i++)
+            ss[i] = classical_ss[i] ^ pq_ss[i];
+        return PQ_SUCCESS;
     }
-    
-    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1) <= 0) {
-        goto cleanup;
-    }
-    
-    if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
-        goto cleanup;
-    }
-    
-    /* Extract EC_KEY */
-    ec_key = EVP_PKEY_get1_EC_KEY(pkey);
-    if (!ec_key) {
-        goto cleanup;
-    }
-    
-    group = EC_KEY_get0_group(ec_key);
-    pub_point = EC_KEY_get0_public_key(ec_key);
-    priv_bn = EC_KEY_get0_private_key(ec_key);
-    
-    if (!group || !pub_point || !priv_bn) {
-        goto cleanup;
-    }
-    
-    /* Convert public key to uncompressed format (0x04 || x || y) */
-    size_t pk_len = EC_POINT_point2oct(group, pub_point, 
-                                       POINT_CONVERSION_UNCOMPRESSED,
-                                       pk, P256_PUBLICKEY_BYTES, NULL);
-    if (pk_len != P256_PUBLICKEY_BYTES) {
-        goto cleanup;
-    }
-    
-    /* Convert private key to 32-byte big-endian */
-    if (BN_bn2binpad(priv_bn, sk, P256_SECRETKEY_BYTES) != P256_SECRETKEY_BYTES) {
-        goto cleanup;
-    }
-    
-    ret = PQ_SUCCESS;
-    
-cleanup:
-    if (ec_key) EC_KEY_free(ec_key);
-    if (pkey) EVP_PKEY_free(pkey);
-    if (pctx) EVP_PKEY_CTX_free(pctx);
-    return ret;
-}
-
-/**
- * @brief Derive ECDH P-256 shared secret
- */
-static int p256_derive(uint8_t *ss, const uint8_t *sk, const uint8_t *peer_pk) {
-    EVP_PKEY *pkey = NULL;
-    EVP_PKEY *peer = NULL;
-    EVP_PKEY_CTX *ctx = NULL;
-    EC_KEY *ec_key = NULL;
-    EC_KEY *peer_ec_key = NULL;
-    EC_GROUP *group = NULL;
-    EC_POINT *peer_point = NULL;
-    BIGNUM *priv_bn = NULL;
-    size_t ss_len = P256_SHAREDSECRET_BYTES;
-    int ret = PQ_ERR_CRYPTO_FAILED;
-    
-    /* Create EC group for P-256 */
-    group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!group) {
-        goto cleanup;
-    }
-    
-    /* Load our secret key */
-    ec_key = EC_KEY_new();
-    if (!ec_key) {
-        goto cleanup;
-    }
-    if (EC_KEY_set_group(ec_key, group) != 1) {
-        goto cleanup;
-    }
-    
-    priv_bn = BN_bin2bn(sk, P256_SECRETKEY_BYTES, NULL);
-    if (!priv_bn) {
-        goto cleanup;
-    }
-    if (EC_KEY_set_private_key(ec_key, priv_bn) != 1) {
-        goto cleanup;
-    }
-    
-    pkey = EVP_PKEY_new();
-    if (!pkey) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_set1_EC_KEY(pkey, ec_key) != 1) {
-        goto cleanup;
-    }
-    
-    /* Load peer's public key */
-    peer_ec_key = EC_KEY_new();
-    if (!peer_ec_key) {
-        goto cleanup;
-    }
-    if (EC_KEY_set_group(peer_ec_key, group) != 1) {
-        goto cleanup;
-    }
-    
-    peer_point = EC_POINT_new(group);
-    if (!peer_point) {
-        goto cleanup;
-    }
-    if (EC_POINT_oct2point(group, peer_point, peer_pk, P256_PUBLICKEY_BYTES, NULL) != 1) {
-        goto cleanup;
-    }
-
-    /* SECURITY: Validate peer's public key is on the P-256 curve.
-     * Missing this check allows invalid curve attacks where an attacker
-     * can send points on a different curve with the same group order,
-     * potentially leaking the private key via the ECDH shared secret.
-     * CWE-295 / CWE-347 */
-    if (EC_POINT_is_on_curve(group, peer_point, NULL) != 1) {
-        /* Peer's point is NOT on the P-256 curve — reject immediately.
-         * This prevents small-subgroup attacks and invalid-curve attacks. */
-        ret = PQ_ERR_CRYPTO_FAILED;
-        goto cleanup;
-    }
-
-    if (EC_KEY_set_public_key(peer_ec_key, peer_point) != 1) {
-        goto cleanup;
-    }
-    
-    peer = EVP_PKEY_new();
-    if (!peer) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_set1_EC_KEY(peer, peer_ec_key) != 1) {
-        goto cleanup;
-    }
-    
-    /* Derive shared secret */
-    ctx = EVP_PKEY_CTX_new(pkey, NULL);
-    if (!ctx) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive_set_peer(ctx, peer) <= 0) {
-        goto cleanup;
-    }
-    if (EVP_PKEY_derive(ctx, ss, &ss_len) <= 0) {
-        goto cleanup;
-    }
-    
-    ret = PQ_SUCCESS;
-    
-cleanup:
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    if (peer) EVP_PKEY_free(peer);
-    if (pkey) EVP_PKEY_free(pkey);
-    if (peer_point) EC_POINT_free(peer_point);
-    if (peer_ec_key) EC_KEY_free(peer_ec_key);
-    if (priv_bn) BN_free(priv_bn);
-    if (ec_key) EC_KEY_free(ec_key);
-    if (group) EC_GROUP_free(group);
-    return ret;
+    return PQ_ERR_INVALID_PARAMETER;
 }
 
 
@@ -411,7 +265,7 @@ pq_hybrid_kex_t* pq_hybrid_kex_init(int classical_alg, int pq_alg, int mode) {
     }
     
     /* Allocate context */
-    pq_hybrid_kex_t *kex = (pq_hybrid_kex_t*)malloc(sizeof(pq_hybrid_kex_t));
+    pq_hybrid_kex_t *kex = (pq_hybrid_kex_t*)calloc(1, sizeof(pq_hybrid_kex_t));
     if (!kex) {
         return NULL;
     }
@@ -441,30 +295,20 @@ int pq_hybrid_kex_keypair(pq_hybrid_kex_t *kex, uint8_t *pk, size_t *pk_len,
     size_t classical_sk_len = get_classical_sk_size(kex->classical_alg);
     size_t pq_pk_len = pq_kem_publickey_bytes(kex->pq_alg);
     size_t pq_sk_len = pq_kem_secretkey_bytes(kex->pq_alg);
-    
-    /* Generate classical key pair */
-    uint8_t *classical_pk = pk;
-    uint8_t *classical_sk = sk;
-    
-    if (kex->classical_alg == HYBRID_CLASSICAL_X25519) {
-        ret = x25519_keypair(classical_pk, classical_sk);
-    } else if (kex->classical_alg == HYBRID_CLASSICAL_P256) {
-        ret = p256_keypair(classical_pk, classical_sk);
-    } else {
+    if (classical_pk_len == 0 || pq_pk_len == 0) {
         return PQ_ERR_INVALID_PARAMETER;
     }
     
+    /* Generate classical key pair (wipes its sk on failure) */
+    ret = classical_keypair(kex->classical_alg, pk, sk);
     if (ret != PQ_SUCCESS) {
         return ret;
     }
     
     /* Generate PQ key pair */
-    uint8_t *pq_pk = pk + classical_pk_len;
-    uint8_t *pq_sk = sk + classical_sk_len;
-    
-    ret = pq_kem_keypair(kex->pq_alg, pq_pk, pq_sk);
+    ret = pq_kem_keypair(kex->pq_alg, pk + classical_pk_len, sk + classical_sk_len);
     if (ret != PQ_SUCCESS) {
-        OPENSSL_cleanse(classical_sk, classical_sk_len);
+        OPENSSL_cleanse(sk, classical_sk_len + pq_sk_len);
         return ret;
     }
     
@@ -482,95 +326,60 @@ int pq_hybrid_kex_encapsulate(pq_hybrid_kex_t *kex, uint8_t *ct, size_t *ct_len,
         return PQ_ERR_INVALID_PARAMETER;
     }
     
-    int ret;
     size_t classical_pk_len = get_classical_pk_size(kex->classical_alg);
     size_t classical_ss_len = get_classical_ss_size(kex->classical_alg);
     size_t pq_pk_len = pq_kem_publickey_bytes(kex->pq_alg);
     size_t pq_ct_len = pq_kem_ciphertext_bytes(kex->pq_alg);
+    if (classical_pk_len == 0 || pq_pk_len == 0) {
+        return PQ_ERR_INVALID_PARAMETER;
+    }
     
-    /* Validate input public key length */
+    /* Validate input public key length (exact) */
     if (pk_len != classical_pk_len + pq_pk_len) {
         return PQ_ERR_INVALID_PARAMETER;
     }
     
-    /* Split public key */
+    /* Split public key and ciphertext buffers */
     const uint8_t *classical_pk = pk;
     const uint8_t *pq_pk = pk + classical_pk_len;
+    uint8_t *classical_ct = ct;                    /* ephemeral public key */
+    uint8_t *pq_ct = ct + classical_pk_len;
     
-    /* Classical encapsulation (generate ephemeral key and derive) */
-    uint8_t classical_eph_sk[P256_SECRETKEY_BYTES];
-    uint8_t classical_ct[P256_PUBLICKEY_BYTES];
-    uint8_t classical_ss[P256_SHAREDSECRET_BYTES];
-    size_t classical_ct_len;
+    uint8_t classical_eph_sk[CLASSICAL_MAX_SK];
+    uint8_t classical_ss[CLASSICAL_MAX_SS];
+    uint8_t pq_ss[PQ_SS_BYTES];
     
-    /* Generate ephemeral classical key pair */
-    if (kex->classical_alg == HYBRID_CLASSICAL_X25519) {
-        ret = x25519_keypair(classical_ct, classical_eph_sk);
-        classical_ct_len = X25519_PUBLICKEY_BYTES;
-    } else if (kex->classical_alg == HYBRID_CLASSICAL_P256) {
-        ret = p256_keypair(classical_ct, classical_eph_sk);
-        classical_ct_len = P256_PUBLICKEY_BYTES;
-    } else {
-        return PQ_ERR_INVALID_PARAMETER;
+    /* Classical encapsulation: ephemeral key pair + ECDH with recipient key */
+    int ret = classical_keypair(kex->classical_alg, classical_ct, classical_eph_sk);
+    if (ret == PQ_SUCCESS) {
+        ret = classical_derive(kex->classical_alg, classical_ss, classical_eph_sk, classical_pk);
     }
-    
-    if (ret != PQ_SUCCESS) {
-        return ret;
-    }
-    
-    /* Derive classical shared secret */
-    if (kex->classical_alg == HYBRID_CLASSICAL_X25519) {
-        ret = x25519_derive(classical_ss, classical_eph_sk, classical_pk);
-    } else if (kex->classical_alg == HYBRID_CLASSICAL_P256) {
-        ret = p256_derive(classical_ss, classical_eph_sk, classical_pk);
-    } else {
-        OPENSSL_cleanse(classical_eph_sk, sizeof(classical_eph_sk));
-        return PQ_ERR_INVALID_PARAMETER;
-    }
-    
     OPENSSL_cleanse(classical_eph_sk, sizeof(classical_eph_sk));
     
-    if (ret != PQ_SUCCESS) {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        return ret;
+    /* PQ encapsulation, directly into the output ciphertext */
+    if (ret == PQ_SUCCESS) {
+        ret = pq_kem_encapsulate(kex->pq_alg, pq_ct, pq_ss, pq_pk);
     }
     
-    /* PQ encapsulation */
-    uint8_t pq_ct[2000];
-    uint8_t pq_ss[32];
-    
-    ret = pq_kem_encapsulate(kex->pq_alg, pq_ct, pq_ss, pq_pk);
-    if (ret != PQ_SUCCESS) {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        return ret;
-    }
-    
-    /* Combine ciphertext (always concatenated) */
-    memcpy(ct, classical_ct, classical_ct_len);
-    memcpy(ct + classical_ct_len, pq_ct, pq_ct_len);
-    *ct_len = classical_ct_len + pq_ct_len;
-    
-    /* Combine shared secret based on mode */
-    if (kex->mode == HYBRID_MODE_CONCAT) {
-        memcpy(ss, classical_ss, classical_ss_len);
-        memcpy(ss + classical_ss_len, pq_ss, 32);
-        *ss_len = classical_ss_len + 32;
-    } else if (kex->mode == HYBRID_MODE_XOR) {
-        /* XOR shared secrets (both are 32 bytes) */
-        for (size_t i = 0; i < 32; i++) {
-            ss[i] = classical_ss[i] ^ pq_ss[i];
-        }
-        *ss_len = 32;
-    } else {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        OPENSSL_cleanse(pq_ss, sizeof(pq_ss));
-        return PQ_ERR_INVALID_PARAMETER;
+    /* Combine */
+    if (ret == PQ_SUCCESS) {
+        ret = combine_secrets(kex, classical_ss, classical_ss_len, pq_ss,
+                              classical_ct, classical_pk_len,
+                              classical_pk, classical_pk_len, ss);
     }
     
     /* Secure cleanup */
     OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
     OPENSSL_cleanse(pq_ss, sizeof(pq_ss));
     
+    if (ret != PQ_SUCCESS) {
+        OPENSSL_cleanse(ss, HYBRID_SS_BYTES);
+        OPENSSL_cleanse(ct, classical_pk_len + pq_ct_len);
+        return ret;
+    }
+    
+    *ct_len = classical_pk_len + pq_ct_len;
+    *ss_len = HYBRID_SS_BYTES;
     return PQ_SUCCESS;
 }
 
@@ -582,14 +391,16 @@ int pq_hybrid_kex_decapsulate(pq_hybrid_kex_t *kex, uint8_t *ss, size_t *ss_len,
         return PQ_ERR_INVALID_PARAMETER;
     }
     
-    int ret;
     size_t classical_pk_len = get_classical_pk_size(kex->classical_alg);
     size_t classical_sk_len = get_classical_sk_size(kex->classical_alg);
     size_t classical_ss_len = get_classical_ss_size(kex->classical_alg);
     size_t pq_sk_len = pq_kem_secretkey_bytes(kex->pq_alg);
     size_t pq_ct_len = pq_kem_ciphertext_bytes(kex->pq_alg);
+    if (classical_pk_len == 0 || pq_sk_len == 0) {
+        return PQ_ERR_INVALID_PARAMETER;
+    }
     
-    /* Validate input lengths */
+    /* Validate input lengths (exact) */
     if (sk_len != classical_sk_len + pq_sk_len) {
         return PQ_ERR_INVALID_PARAMETER;
     }
@@ -597,60 +408,46 @@ int pq_hybrid_kex_decapsulate(pq_hybrid_kex_t *kex, uint8_t *ss, size_t *ss_len,
         return PQ_ERR_INVALID_PARAMETER;
     }
     
-    /* Split secret key */
+    /* Split secret key and ciphertext (classical_ct is the peer's ephemeral public key) */
     const uint8_t *classical_sk = sk;
     const uint8_t *pq_sk = sk + classical_sk_len;
-    
-    /* Split ciphertext (classical_ct is peer's ephemeral public key) */
     const uint8_t *classical_ct = ct;
     const uint8_t *pq_ct = ct + classical_pk_len;
     
-    /* Classical decapsulation (derive shared secret from ephemeral public key) */
-    uint8_t classical_ss[P256_SHAREDSECRET_BYTES];
+    uint8_t classical_pk[CLASSICAL_MAX_PK];
+    uint8_t classical_ss[CLASSICAL_MAX_SS];
+    uint8_t pq_ss[PQ_SS_BYTES];
     
-    if (kex->classical_alg == HYBRID_CLASSICAL_X25519) {
-        ret = x25519_derive(classical_ss, classical_sk, classical_ct);
-    } else if (kex->classical_alg == HYBRID_CLASSICAL_P256) {
-        ret = p256_derive(classical_ss, classical_sk, classical_ct);
-    } else {
-        return PQ_ERR_INVALID_PARAMETER;
-    }
+    /* Classical decapsulation */
+    int ret = classical_derive(kex->classical_alg, classical_ss, classical_sk, classical_ct);
     
-    if (ret != PQ_SUCCESS) {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        return ret;
+    /* Our own classical public key is an input to the CONCAT KDF */
+    if (ret == PQ_SUCCESS) {
+        ret = classical_public_from_private(kex->classical_alg, classical_sk, classical_pk);
     }
     
     /* PQ decapsulation */
-    uint8_t pq_ss[32];
-    
-    ret = pq_kem_decapsulate(kex->pq_alg, pq_ss, pq_ct, pq_sk);
-    if (ret != PQ_SUCCESS) {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        return ret;
+    if (ret == PQ_SUCCESS) {
+        ret = pq_kem_decapsulate(kex->pq_alg, pq_ss, pq_ct, pq_sk);
     }
     
-    /* Combine shared secret based on mode */
-    if (kex->mode == HYBRID_MODE_CONCAT) {
-        memcpy(ss, classical_ss, classical_ss_len);
-        memcpy(ss + classical_ss_len, pq_ss, 32);
-        *ss_len = classical_ss_len + 32;
-    } else if (kex->mode == HYBRID_MODE_XOR) {
-        /* XOR shared secrets (both are 32 bytes) */
-        for (size_t i = 0; i < 32; i++) {
-            ss[i] = classical_ss[i] ^ pq_ss[i];
-        }
-        *ss_len = 32;
-    } else {
-        OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
-        OPENSSL_cleanse(pq_ss, sizeof(pq_ss));
-        return PQ_ERR_INVALID_PARAMETER;
+    /* Combine */
+    if (ret == PQ_SUCCESS) {
+        ret = combine_secrets(kex, classical_ss, classical_ss_len, pq_ss,
+                              classical_ct, classical_pk_len,
+                              classical_pk, classical_pk_len, ss);
     }
     
     /* Secure cleanup */
     OPENSSL_cleanse(classical_ss, sizeof(classical_ss));
     OPENSSL_cleanse(pq_ss, sizeof(pq_ss));
     
+    if (ret != PQ_SUCCESS) {
+        OPENSSL_cleanse(ss, HYBRID_SS_BYTES);
+        return ret;
+    }
+    
+    *ss_len = HYBRID_SS_BYTES;
     return PQ_SUCCESS;
 }
 
@@ -697,11 +494,8 @@ size_t pq_hybrid_kex_sharedsecret_bytes(pq_hybrid_kex_t *kex) {
         return 0;
     }
     
-    if (kex->mode == HYBRID_MODE_CONCAT) {
-        size_t classical_ss_len = get_classical_ss_size(kex->classical_alg);
-        return classical_ss_len + 32;  /* PQ shared secret is always 32 bytes */
-    } else if (kex->mode == HYBRID_MODE_XOR) {
-        return 32;  /* XOR mode produces fixed 32-byte shared secret */
+    if (kex->mode == HYBRID_MODE_CONCAT || kex->mode == HYBRID_MODE_XOR) {
+        return HYBRID_SS_BYTES;  /* both modes produce a 32-byte secret */
     }
     
     return 0;

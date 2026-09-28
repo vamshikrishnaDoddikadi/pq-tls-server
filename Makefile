@@ -83,7 +83,8 @@ TEST_MOD_SRCS := $(PROJ)/src/http/http_parser.c \
                  $(PROJ)/src/core/tls_policy.c \
                  $(PROJ)/src/proxy/http_rewriter.c \
                  $(PROJ)/src/security/rate_limiter.c \
-                 $(PROJ)/src/security/acl.c
+                 $(PROJ)/src/security/acl.c \
+                 $(COMMON_SRCS)
 TEST_ALL_SRCS := $(TEST_SRCS) $(TEST_MOD_SRCS)
 TEST_OBJS    := $(patsubst $(PROJ)/%.c,$(BUILDDIR)/%.o,$(TEST_ALL_SRCS))
 
@@ -124,7 +125,7 @@ $(BUILDDIR)/bin/pq-tls-server: $(ALL_OBJS)
 
 $(BUILDDIR)/bin/pq-tls-tests: $(TEST_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $^ -lssl -lcrypto -lpthread
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 	@echo "=== Built: pq-tls-tests ==="
 
 $(BUILDDIR)/%.o: $(PROJ)/%.c
