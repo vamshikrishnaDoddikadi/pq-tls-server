@@ -39,7 +39,7 @@ jobs:
       - uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
-          queries: security-and-quality
+          queries: security-extended   # security queries only; maintainability notes are noise here
 
       - name: Build
         run: |
