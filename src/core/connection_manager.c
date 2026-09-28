@@ -22,6 +22,7 @@
 #include "../proxy/http_proxy.h"
 #include "../dashboard/dashboard.h"
 #include "../mgmt/mgmt_server.h"
+#include "../mgmt/log_streamer.h"
 #include "../security/rate_limiter.h"
 #include "../security/acl.h"
 #include "../common/crypto_registry.h"
@@ -96,6 +97,9 @@ static void mgr_log(pq_conn_manager_t *mgr, int lvl, const char *fmt, ...) {
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
     const char *level = level_str[lvl < 4 ? lvl : 3];
+
+    /* Feed the dashboard's live log viewer (no-op when it is not running). */
+    log_streamer_push(level, msg);
 
     pthread_mutex_lock(&mgr->log_mutex);
     if (mgr->json_logging) {

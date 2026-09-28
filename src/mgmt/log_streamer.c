@@ -26,6 +26,9 @@ typedef struct {
     char     timestamp[32];
 } log_entry_t;
 
+/* The mutex is statically initialized and never destroyed: the server's
+ * logger pushes into the ring from every thread, including while the
+ * management server starts or stops. */
 static struct {
     log_entry_t     ring[LOG_RING_SIZE];
     int             head;       /* Next write position */
@@ -33,14 +36,16 @@ static struct {
     pthread_mutex_t mutex;
     atomic_int      initialized;
     atomic_int      running;
-} ls;
+} ls = { .mutex = PTHREAD_MUTEX_INITIALIZER };
 
 void log_streamer_init(const char *log_file) {
-    (void)log_file; /* File tailing not used — we capture via push */
-    memset(&ls, 0, sizeof(ls));
-    pthread_mutex_init(&ls.mutex, NULL);
-    atomic_store(&ls.initialized, 1);
+    (void)log_file; /* File tailing not used — the logger pushes entries */
+    pthread_mutex_lock(&ls.mutex);
+    ls.head = 0;
+    ls.count = 0;
+    pthread_mutex_unlock(&ls.mutex);
     atomic_store(&ls.running, 1);
+    atomic_store(&ls.initialized, 1);
 }
 
 void log_streamer_push(const char *level, const char *message) {
@@ -107,14 +112,17 @@ int log_streamer_recent(char *buf, size_t cap, int count) {
 }
 
 void log_streamer_stream_sse(int client_fd) {
-    if (!atomic_load(&ls.initialized)) return;
+    if (!atomic_load(&ls.initialized)) {
+        close(client_fd);
+        return;
+    }
 
     /* Send SSE headers */
     const char *headers =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Cache-Control: no-cache\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
         "Connection: keep-alive\r\n\r\n";
     send(client_fd, headers, strlen(headers), MSG_NOSIGNAL);
 
@@ -180,7 +188,6 @@ void log_streamer_cleanup(void) {
     if (!atomic_load(&ls.initialized)) return;
     atomic_store(&ls.running, 0);
     atomic_store(&ls.initialized, 0);
-    /* Give SSE streams time to notice running=0 and exit */
-    usleep(600000);
-    pthread_mutex_destroy(&ls.mutex);
+    /* Streams notice running=0 within one poll interval; the management
+     * server waits for them before the manager is torn down. */
 }

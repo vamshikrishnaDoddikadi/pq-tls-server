@@ -9,6 +9,7 @@
 #include "config_writer.h"
 #include "cert_manager.h"
 #include "log_streamer.h"
+#include "mgmt_server.h"
 #include "../security/rate_limiter.h"
 #include "../security/acl.h"
 
@@ -52,9 +53,10 @@ static void send_http(int fd, const char *status, const char *content_type,
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "Referrer-Policy: no-referrer\r\n"
         "Connection: close\r\n\r\n",
         status, content_type, body_len);
     send(fd, header, (size_t)hlen, MSG_NOSIGNAL);
@@ -73,7 +75,10 @@ static void send_json_with_cookie(int fd, const char *json, const char *token) {
         "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
         "Set-Cookie: mgmt_token=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "Referrer-Policy: no-referrer\r\n"
         "Connection: close\r\n\r\n",
         strlen(json), token, MGMT_SESSION_TTL_SEC);
     send(fd, header, (size_t)hlen, MSG_NOSIGNAL);
@@ -95,6 +100,27 @@ static int require_auth(mgmt_api_ctx_t *ctx) {
     if (!ctx->auth_token || !mgmt_auth_validate_session(ctx->auth_token)) {
         send_error(ctx->client_fd, "401 Unauthorized", "Authentication required");
         return 0;
+    }
+    return 1;
+}
+
+/* Values that end up in the INI file or in file paths must not contain
+ * control characters (config-line injection). */
+static int valid_text(const char *s) {
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x20 || c == 0x7f) return 0;
+    }
+    return 1;
+}
+
+/* TLS group lists: names, separators and OpenSSL 3.5 list syntax only. */
+static int valid_groups(const char *s) {
+    for (; *s; s++) {
+        char c = *s;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == ':' || c == '_' || c == '-' || c == '/' || c == '?' || c == '*' || c == '.'))
+            return 0;
     }
     return 1;
 }
@@ -197,6 +223,21 @@ void mgmt_api_auth_setup(mgmt_api_ctx_t *ctx) {
         return;
     }
 
+    /* Anyone who can reach the dashboard could otherwise claim the admin
+     * account first: require the one-time token printed in the server log. */
+    if (!mgmt_auth_login_rate_check(ctx->client_ip, 0)) {   /* counts the attempt */
+        send_error(ctx->client_fd, "429 Too Many Requests", "Too many attempts, try again later");
+        return;
+    }
+    char setup_token[64] = {0};
+    if (json_extract_string(ctx->body, "setup_token", setup_token, sizeof(setup_token)) != 0 ||
+        !mgmt_auth_setup_token_check(setup_token)) {
+        mgmt_auth_audit_log(ctx->client_ip, "-", "SETUP_TOKEN_FAIL");
+        send_error(ctx->client_fd, "403 Forbidden",
+                   "Invalid setup token (it is printed in the server log at startup)");
+        return;
+    }
+
     char username[64] = {0}, password[256] = {0};
     if (json_extract_string(ctx->body, "username", username, sizeof(username)) != 0 ||
         json_extract_string(ctx->body, "password", password, sizeof(password)) != 0) {
@@ -219,17 +260,29 @@ void mgmt_api_auth_setup(mgmt_api_ctx_t *ctx) {
         return;
     }
 
+    if (!valid_text(username)) {
+        send_error(ctx->client_fd, "400 Bad Request", "Invalid username");
+        return;
+    }
+
     /* Update config */
+    pq_conn_manager_config_wrlock(ctx->mgr);
     snprintf(ctx->config->mgmt_admin_user, sizeof(ctx->config->mgmt_admin_user), "%s", username);
     snprintf(ctx->config->mgmt_admin_pass_hash, sizeof(ctx->config->mgmt_admin_pass_hash), "%s", hash);
     ctx->config->mgmt_enabled = 1;
+    pq_conn_manager_config_unlock(ctx->mgr);
+    mgmt_auth_setup_token_clear();
+    mgmt_auth_login_rate_check(ctx->client_ip, 1);
+    mgmt_auth_audit_log(ctx->client_ip, username, "SETUP_COMPLETE");
 
     /* Save config — use default path if none set */
+    pq_conn_manager_config_rdlock(ctx->mgr);
     if (ctx->config_path && ctx->config_path[0]) {
         pq_server_config_save(ctx->config, ctx->config_path);
     } else {
-        pq_server_config_save(ctx->config, "/etc/pq-tls-server.conf");
+        pq_server_config_save(ctx->config, "/etc/pq-tls-server/pq-tls-server.conf");
     }
+    pq_conn_manager_config_unlock(ctx->mgr);
 
     /* Create session */
     char token[MGMT_TOKEN_HEX_LEN + 1];
@@ -375,27 +428,6 @@ void mgmt_api_config_get(mgmt_api_ctx_t *ctx) {
 /* ======================================================================== */
 /* Config PUT handlers                                                       */
 /* ======================================================================== */
-
-/* Values that end up in the INI file or in file paths must not contain
- * control characters (config-line injection). */
-static int valid_text(const char *s) {
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        if (c < 0x20 || c == 0x7f) return 0;
-    }
-    return 1;
-}
-
-/* TLS group lists: names, separators and OpenSSL 3.5 list syntax only. */
-static int valid_groups(const char *s) {
-    for (; *s; s++) {
-        char c = *s;
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == ':' || c == '_' || c == '-' || c == '/' || c == '?' || c == '*' || c == '.'))
-            return 0;
-    }
-    return 1;
-}
 
 static void save_and_respond(mgmt_api_ctx_t *ctx, int restart_required) {
     if (ctx->config_path && ctx->config_path[0]) {
@@ -1117,9 +1149,23 @@ void mgmt_api_mgmt_restart(mgmt_api_ctx_t *ctx) {
 /* Log endpoints                                                             */
 /* ======================================================================== */
 
+static void log_stream_fn(int fd, void *arg) {
+    (void)arg;
+    log_streamer_stream_sse(fd);   /* closes fd */
+}
+
+/* The dispatcher leaves this fd open: we own it on every path. The stream
+ * runs on its own thread so an open log viewer does not block the (single-
+ * threaded) management server. */
 void mgmt_api_logs_stream(mgmt_api_ctx_t *ctx) {
-    if (!require_auth(ctx)) return;
-    log_streamer_stream_sse(ctx->client_fd);
+    if (!require_auth(ctx)) {
+        close(ctx->client_fd);
+        return;
+    }
+    if (pq_mgmt_spawn_stream(ctx->client_fd, log_stream_fn, NULL) != 0) {
+        send_error(ctx->client_fd, "503 Service Unavailable", "Too many open streams");
+        close(ctx->client_fd);
+    }
 }
 
 void mgmt_api_logs_recent(mgmt_api_ctx_t *ctx) {
