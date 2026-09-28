@@ -35,9 +35,9 @@ podLabels: {}
 # Pod security context
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
 
 # Container security context
 securityContext:
@@ -136,18 +136,30 @@ server:
   port: 8443
   # Management/metrics port
   mgmtPort: 9090
-  # Worker threads (0 = auto-detect CPUs)
+  # Acceptor threads (0 = auto); each connection gets its own thread
   workers: 0
-  # Maximum concurrent connections
+  # Maximum concurrent client connections
   maxConnections: 1024
+  # TLS handshake / request-head deadline (ms)
+  handshakeTimeoutMs: 10000
+  # Graceful shutdown drain window (ms)
+  drainTimeoutMs: 10000
+  # "http" rewrites X-Forwarded-* / X-PQ-* headers; "tcp" relays opaque bytes
+  mode: http
+
+# Must exceed server.drainTimeoutMs (seconds)
+terminationGracePeriodSeconds: 30
 
 # Backend servers to proxy traffic to
 backends: []
 # - address: "backend-service:8080"
 #   weight: 1
 
-# TLS key exchange groups
-groups: "X25519MLKEM768:X25519"
+# TLS key exchange groups, in preference order (unsupported ones are skipped)
+groups: "X25519MLKEM768:SecP256r1MLKEM768:X25519:P-256"
+
+# Refuse clients that cannot negotiate post-quantum key exchange
+requirePq: false
 
 # Rate limiting (0 = disabled)
 rateLimit:
@@ -167,8 +179,7 @@ logging:
   json: false
   accessLog: true
 
-# Environment variables for the container
-# OPENSSL_MODULES and LD_LIBRARY_PATH are set automatically
+# Extra environment variables for the container
 extraEnv: []
 
 # Secret containing the TLS cert and key

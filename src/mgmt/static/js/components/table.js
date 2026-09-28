@@ -20,7 +20,9 @@ var Table = {
             html += '<tr>';
             columns.forEach(function(col) {
                 var val = row[col.key];
-                if (col.render) val = col.render(val, row, idx);
+                /* Raw values are escaped; render() returns trusted markup
+                 * and must escape any data it interpolates itself. */
+                val = col.render ? col.render(val, row, idx) : escHtml(val);
                 html += '<td>' + (val != null ? val : '') + '</td>';
             });
             if (actions) {

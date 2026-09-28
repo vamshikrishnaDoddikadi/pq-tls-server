@@ -88,6 +88,14 @@ int mgmt_auth_is_totp_enabled(const pq_server_config_t *cfg);
  * Clean up all sessions.
  */
 void mgmt_auth_cleanup(void);
+
+/**
+ * One-time first-run setup token. Generated (once) while no admin account
+ * exists and printed to the server log; /api/auth/setup requires it.
+ */
+const char *mgmt_auth_setup_token_init(void);
+int mgmt_auth_setup_token_check(const char *token);   /* 1 = valid */
+void mgmt_auth_setup_token_clear(void);
 /* ── Login rate limiter (C-1 fix) ────────────────────────────────── */
 #define MGMT_LOGIN_MAX_ATTEMPTS   5    /* max failures before lockout */
 #define MGMT_LOGIN_WINDOW_SEC    60    /* tracking window */

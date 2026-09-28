@@ -31,6 +31,7 @@
 
 static pthread_t mgmt_thread;
 static atomic_int mgmt_running = 0;
+static atomic_int mgmt_thread_live = 0;   /* created and not yet joined */
 static pq_conn_manager_t *g_mgr = NULL;
 static pq_server_config_t *g_config = NULL;
 static int g_port = 0;
@@ -43,16 +44,33 @@ static char g_config_path[2048] = {0};
 /* HTTP Response Helpers                                                    */
 /* ======================================================================== */
 
+/* The dashboard builds some markup with inline event handlers, hence
+ * 'unsafe-inline' for scripts; everything else is locked to this origin
+ * (plus Google Fonts), and framing / plugins / foreign form targets are
+ * refused. */
+#define MGMT_CSP "default-src 'self'; script-src 'self' 'unsafe-inline'; " \
+                 "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " \
+                 "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " \
+                 "connect-src 'self'; object-src 'none'; base-uri 'none'; " \
+                 "form-action 'self'; frame-ancestors 'none'"
+
 static void send_response(int fd, const char *status, const char *content_type,
                           const char *body, size_t body_len) {
-    char header[1024];
+    char header[1536];
+    int is_html = strncmp(content_type, "text/html", 9) == 0;
     int hlen = snprintf(header, sizeof(header),
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "Referrer-Policy: no-referrer\r\n"
+        "%s%s%s"
         "Connection: close\r\n\r\n",
-        status, content_type, body_len);
+        status, content_type, body_len,
+        is_html ? "Content-Security-Policy: " : "",
+        is_html ? MGMT_CSP : "",
+        is_html ? "\r\n" : "");
     send(fd, header, (size_t)hlen, MSG_NOSIGNAL);
     if (body && body_len > 0)
         send(fd, body, body_len, MSG_NOSIGNAL);
@@ -100,22 +118,59 @@ static int serve_static(int fd, const char *path) {
 /* SSE metrics stream (backward-compatible with /api/stream)                 */
 /* ======================================================================== */
 
-typedef struct {
-    int fd;
-    pq_conn_manager_t *mgr;
-} sse_ctx_t;
+/* Long-lived streams run on their own threads so they never block the
+ * (single-threaded) request loop. Their number is bounded, and
+ * pq_mgmt_stop() waits for them, because they reference the manager. */
+#define MGMT_MAX_STREAMS 16
+static atomic_int g_streams = 0;
 
-static void* sse_thread_fn(void *arg) {
-    sse_ctx_t *ctx = (sse_ctx_t *)arg;
-    int fd = ctx->fd;
-    pq_conn_manager_t *mgr = ctx->mgr;
-    free(ctx);
+typedef struct {
+    int    fd;
+    void (*fn)(int fd, void *arg);
+    void  *arg;
+} stream_task_t;
+
+static void *stream_thread(void *p) {
+    stream_task_t t = *(stream_task_t *)p;
+    free(p);
+    t.fn(t.fd, t.arg);                 /* fn closes fd */
+    atomic_fetch_sub(&g_streams, 1);
+    return NULL;
+}
+
+int pq_mgmt_spawn_stream(int fd, void (*fn)(int fd, void *arg), void *arg) {
+    if (atomic_fetch_add(&g_streams, 1) >= MGMT_MAX_STREAMS) {
+        atomic_fetch_sub(&g_streams, 1);
+        return -1;
+    }
+    stream_task_t *t = malloc(sizeof(*t));
+    pthread_t th;
+    pthread_attr_t attr;
+    int ok = 0;
+    if (t && pthread_attr_init(&attr) == 0) {
+        t->fd = fd;
+        t->fn = fn;
+        t->arg = arg;
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        ok = pthread_create(&th, &attr, stream_thread, t) == 0;
+        pthread_attr_destroy(&attr);
+    }
+    if (!ok) {
+        free(t);
+        atomic_fetch_sub(&g_streams, 1);
+        return -1;
+    }
+    return 0;
+}
+
+static void sse_stream_fn(int fd, void *arg) {
+    pq_conn_manager_t *mgr = arg;
 
     const char *headers =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Cache-Control: no-cache\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
         "Connection: keep-alive\r\n\r\n";
     send(fd, headers, strlen(headers), MSG_NOSIGNAL);
 
@@ -133,7 +188,6 @@ static void* sse_thread_fn(void *arg) {
     }
 
     close(fd);
-    return NULL;
 }
 
 /* ======================================================================== */
@@ -274,23 +328,16 @@ static void handle_request(int fd, pq_conn_manager_t *mgr, pq_server_config_t *c
     }
 
     if (strcmp(clean_path, "/api/stream") == 0 && strcmp(method, "GET") == 0) {
-        sse_ctx_t *ctx = malloc(sizeof(sse_ctx_t));
-        if (ctx) {
-            ctx->fd = fd;
-            ctx->mgr = mgr;
-            pthread_t t;
-            if (pthread_create(&t, NULL, sse_thread_fn, ctx) == 0) {
-                pthread_detach(t);
-                return; /* fd ownership transferred */
-            }
-            free(ctx);
-        }
+        if (pq_mgmt_spawn_stream(fd, sse_stream_fn, mgr) == 0)
+            return; /* fd ownership transferred */
+        const char *busy = "{\"error\":\"Too many open streams\"}";
+        send_response(fd, "503 Service Unavailable", "application/json", busy, strlen(busy));
         close(fd);
         return;
     }
 
     if (strcmp(clean_path, "/metrics") == 0 && strcmp(method, "GET") == 0) {
-        char buf[4096];
+        char buf[8192];
         pq_prometheus_format(mgr, buf, sizeof(buf));
         send_response(fd, "200 OK", "text/plain; version=0.0.4; charset=utf-8",
                       buf, strlen(buf));
@@ -383,6 +430,14 @@ static void* mgmt_thread_fn(void *arg) {
     mgmt_auth_init();
     log_streamer_init(g_config->log_file[0] ? g_config->log_file : NULL);
 
+    if (mgmt_auth_needs_setup(g_config)) {
+        const char *tok = mgmt_auth_setup_token_init();
+        fprintf(stderr,
+                "\n  First-run setup: open the management dashboard on port %d and enter\n"
+                "  this one-time setup token to create the admin account:\n\n"
+                "      %s\n\n", g_port, tok);
+    }
+
     while (atomic_load(&mgmt_running)) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
         int ret = poll(&pfd, 1, 1000);
@@ -390,8 +445,14 @@ static void* mgmt_thread_fn(void *arg) {
 
         struct sockaddr_in peer;
         socklen_t peer_len = sizeof(peer);
-        int cfd = accept(fd, (struct sockaddr*)&peer, &peer_len);
+        int cfd = accept4(fd, (struct sockaddr*)&peer, &peer_len, SOCK_CLOEXEC);
         if (cfd < 0) continue;
+
+        /* Requests are handled one at a time: a client that stalls must
+         * not be able to block /health, /metrics and the API for everyone. */
+        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         char client_ip[64] = "unknown";
         inet_ntop(AF_INET, &peer.sin_addr, client_ip, sizeof(client_ip));
@@ -424,13 +485,23 @@ int pq_mgmt_start(pq_conn_manager_t *mgr, pq_server_config_t *config,
     atomic_store(&mgmt_running, 1);
 
     if (pthread_create(&mgmt_thread, NULL, mgmt_thread_fn, NULL) != 0) {
+        atomic_store(&mgmt_running, 0);
         return -1;
     }
+    atomic_store(&mgmt_thread_live, 1);
     return 0;
 }
 
 void pq_mgmt_stop(void) {
-    if (!atomic_load(&mgmt_running)) return;
     atomic_store(&mgmt_running, 0);
-    pthread_join(mgmt_thread, NULL);
+    if (!atomic_load(&mgmt_thread_live)) return;
+    /* Called from a request handler (e.g. the restart endpoint): the thread
+     * exits on its own; the owner joins it later from another thread. */
+    if (pthread_equal(pthread_self(), mgmt_thread)) return;
+    if (atomic_exchange(&mgmt_thread_live, 0))
+        pthread_join(mgmt_thread, NULL);
+    /* Streams notice the stop within ~1 s (sends are bounded by
+     * SO_SNDTIMEO); wait so none outlives the manager it references. */
+    for (int i = 0; i < 150 && atomic_load(&g_streams) > 0; i++)
+        usleep(50000);
 }

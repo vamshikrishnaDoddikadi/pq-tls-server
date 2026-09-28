@@ -9,8 +9,18 @@
  * to provide defense-in-depth security.
  *
  * Supported modes:
- * - CONCAT: Concatenate classical and PQ shared secrets
- * - XOR: XOR classical and PQ shared secrets (fixed 32-byte output)
+ * - CONCAT: KDF over the concatenated classical and PQ shared secrets plus
+ *   the classical ciphertext and public key (X-Wing-style combiner, 32-byte
+ *   output):
+ *     ss = SHA3-256(pq_ss || classical_ss || classical_ct || classical_pk || label)
+ *   label = "pq-tls/hybrid-kex/v2" || I2OSP(classical_alg, 1) || I2OSP(pq_alg, 1)
+ *   The PQ ciphertext need not be hashed because ML-KEM is ciphertext-binding
+ *   (the same argument as X-Wing, draft-connolly-cfrg-xwing-kem).
+ *   Earlier versions returned the raw classical_ss || pq_ss (64 bytes); that
+ *   output was not a uniformly random key and did not bind the transcript.
+ * - XOR: DEPRECATED / INSECURE - classical_ss XOR pq_ss.  Not an IND-CCA
+ *   combiner (no KDF, no ciphertext/public-key binding).  Retained only for
+ *   configuration compatibility; never the default.
  */
 
 #ifndef HYBRID_KEX_H
@@ -34,8 +44,8 @@ extern "C" {
  * are combined to produce the final hybrid shared secret.
  */
 typedef enum {
-    HYBRID_MODE_CONCAT = 1,  /**< Concatenate shared secrets: classical_ss || pq_ss */
-    HYBRID_MODE_XOR = 2      /**< XOR shared secrets: classical_ss XOR pq_ss (32 bytes) */
+    HYBRID_MODE_CONCAT = 1,  /**< KDF(pq_ss || classical_ss || classical_ct || classical_pk || label), 32 bytes (default) */
+    HYBRID_MODE_XOR = 2      /**< DEPRECATED, INSECURE: classical_ss XOR pq_ss (32 bytes) */
 } pq_hybrid_mode_t;
 
 /**
@@ -127,9 +137,10 @@ int pq_hybrid_kex_keypair(pq_hybrid_kex_t *kex, uint8_t *pk, size_t *pk_len,
  * @return PQ_SUCCESS on success, error code on failure
  *
  * @note Ciphertext is always concatenated: classical_ct || pq_ct
- *       Shared secret depends on mode:
- *       - CONCAT: classical_ss || pq_ss
- *       - XOR: classical_ss XOR pq_ss (32 bytes)
+ *       Shared secret (32 bytes) depends on mode:
+ *       - CONCAT: SHA3-256(pq_ss || classical_ss || classical_ct || classical_pk || label)
+ *       - XOR (deprecated, insecure): classical_ss XOR pq_ss
+ *       All outputs are wiped on failure.
  */
 int pq_hybrid_kex_encapsulate(pq_hybrid_kex_t *kex, uint8_t *ct, size_t *ct_len,
                               uint8_t *ss, size_t *ss_len,
@@ -150,9 +161,9 @@ int pq_hybrid_kex_encapsulate(pq_hybrid_kex_t *kex, uint8_t *ct, size_t *ct_len,
  * @param sk_len Length of secret key
  * @return PQ_SUCCESS on success, error code on failure
  *
- * @note Shared secret depends on mode:
- *       - CONCAT: classical_ss || pq_ss
- *       - XOR: classical_ss XOR pq_ss (32 bytes)
+ * @note Shared secret depends on mode (see pq_hybrid_kex_encapsulate()).
+ *       The classical public key used by the CONCAT KDF is recomputed from
+ *       the classical secret key.
  */
 int pq_hybrid_kex_decapsulate(pq_hybrid_kex_t *kex, uint8_t *ss, size_t *ss_len,
                               const uint8_t *ct, size_t ct_len,
@@ -190,9 +201,7 @@ size_t pq_hybrid_kex_ciphertext_bytes(pq_hybrid_kex_t *kex);
  * @brief Get shared secret size for hybrid key exchange
  *
  * @param kex Hybrid key exchange context
- * @return Shared secret size in bytes
- *         - CONCAT mode: classical_ss_size + pq_ss_size
- *         - XOR mode: 32 bytes (fixed)
+ * @return Shared secret size in bytes (32 for both modes)
  */
 size_t pq_hybrid_kex_sharedsecret_bytes(pq_hybrid_kex_t *kex);
 

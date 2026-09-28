@@ -14,7 +14,7 @@
   <a href="https://github.com/vamshikrishnaDoddikadi?tab=repositories"><img src="https://img.shields.io/badge/Repositories-2-38bdf8?style=flat-square" alt="Repos"></a>
   <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server"><img src="https://img.shields.io/badge/Stars-4-34d399?style=flat-square" alt="Stars"></a>
   <a href="https://www.linkedin.com/in/vamshivivaan"><img src="https://img.shields.io/badge/LinkedIn-vamshivivaan-0a66c2?style=flat-square" alt="LinkedIn"></a>
-  <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server/blob/main/LICENSE"><img src="https://img.shields.io/badge/Open%20Source-MIT-6b7280?style=flat-square" alt="MIT"></a>
+  <a href="https://github.com/vamshikrishnaDoddikadi/pq-tls-server/blob/master/LICENSE"><img src="https://img.shields.io/badge/Open%20Source-MIT-6b7280?style=flat-square" alt="MIT"></a>
 </p>
 
 <br>

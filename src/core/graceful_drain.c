@@ -71,24 +71,27 @@ void pq_drain_manager_destroy(pq_drain_manager_t *dm)
     free(dm);
 }
 
+/* Seconds on the monotonic clock (immune to wall-clock adjustments) */
+static time_t drain_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
+}
+
 /*
  * Send GOAWAY frame for HTTP/2 connection
  * Returns: 0 on success, -1 on error
  *
- * Ensures proper last-stream-id is set to prevent clients from creating
- * new streams after receiving GOAWAY. Uses only streams that have been
- * explicitly created by the client.
+ * last_stream is the highest peer-initiated stream the server processed
+ * (RFC 9113 6.8). Client-initiated streams are odd, so any value is passed
+ * through; only the reserved high bit is cleared.
  */
 static int send_goaway(int fd, SSL *ssl, uint32_t last_stream)
 {
     uint8_t buf[H2_FRAME_HEADER_SIZE + 8];
 
-    /* Validate last_stream_id: must be even (client-initiated streams)
-       or 0 if no streams processed. Odd stream IDs are server-initiated. */
-    if (last_stream > 0 && (last_stream & 1) != 0) {
-        /* Server-initiated stream ID in GOAWAY is invalid. Use 0 instead. */
-        last_stream = 0;
-    }
+    last_stream &= 0x7FFFFFFFu;
 
     int bytes = h2_frame_encode_goaway(buf, sizeof(buf), last_stream, H2_NO_ERROR);
     if (bytes < 0)
@@ -100,7 +103,7 @@ static int send_goaway(int fd, SSL *ssl, uint32_t last_stream)
         if (written <= 0)
             return -1;
     } else {
-        ssize_t written = send(fd, buf, bytes, MSG_NOSIGNAL);
+        ssize_t written = send(fd, buf, (size_t)bytes, MSG_NOSIGNAL);
         if (written < bytes)
             return -1;
     }
@@ -116,6 +119,15 @@ int pq_drain_add(pq_drain_manager_t *dm, pq_draining_conn_t *conn)
     if (!dm || !conn || conn->fd < 0)
         return -1;
 
+    /*
+     * Send GOAWAY before the connection is published to the pool: once it
+     * is in the pool, pq_drain_tick() may SSL_shutdown()/SSL_free() it from
+     * another thread, and SSL objects must not be used concurrently.
+     */
+    if (conn->h2) {
+        send_goaway(conn->fd, conn->ssl, conn->last_stream);
+    }
+
     pthread_mutex_lock(&dm->lock);
 
     if (dm->pool_count >= MAX_DRAINING_CONNECTIONS) {
@@ -125,16 +137,12 @@ int pq_drain_add(pq_drain_manager_t *dm, pq_draining_conn_t *conn)
 
     int idx = dm->pool_count;
     memcpy(&dm->pool[idx].conn, conn, sizeof(pq_draining_conn_t));
-    dm->pool[idx].conn.drain_start = time(NULL);
+    /* Same clock as pq_drain_tick() */
+    dm->pool[idx].conn.drain_start = drain_now();
     dm->pool[idx].active = 1;
     dm->pool_count++;
 
     pthread_mutex_unlock(&dm->lock);
-
-    /* Send GOAWAY for HTTP/2 connections */
-    if (conn->h2) {
-        send_goaway(conn->fd, conn->ssl, conn->last_stream);
-    }
 
     return 0;
 }
@@ -150,9 +158,7 @@ int pq_drain_tick(pq_drain_manager_t *dm)
 
     pthread_mutex_lock(&dm->lock);
 
-    struct timespec now_ts;
-    clock_gettime(CLOCK_MONOTONIC, &now_ts);
-    time_t now = now_ts.tv_sec;
+    time_t now = drain_now();
     int still_draining = 0;
 
     for (int i = 0; i < dm->pool_count; i++) {

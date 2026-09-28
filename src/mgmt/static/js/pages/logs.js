@@ -42,17 +42,39 @@ var LogsPage = {
             }
         }).catch(function() {});
 
-        /* Connect SSE for live streaming */
-        self.evtSrc = new EventSource('/api/logs/stream?token=' + API.getToken());
-        self.evtSrc.onmessage = function(e) {
-            if (self.paused) return;
-            try {
-                self.appendEntry(JSON.parse(e.data));
-            } catch(ex) { /* ignore parse errors */ }
-        };
-        self.evtSrc.onerror = function() {
+        /* Live streaming. EventSource cannot send an Authorization header
+         * and session tokens must not travel in URLs, so read the SSE
+         * stream with fetch() instead. */
+        var ctrl = new AbortController();
+        self.evtSrc = { close: function() { ctrl.abort(); } };
+        fetch('/api/logs/stream', {
+            headers: { 'Authorization': 'Bearer ' + API.getToken() },
+            signal: ctrl.signal
+        }).then(function(resp) {
+            if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+            var reader = resp.body.getReader();
+            var decoder = new TextDecoder();
+            var buf = '';
+            function pump() {
+                return reader.read().then(function(chunk) {
+                    if (chunk.done) throw new Error('closed');
+                    buf += decoder.decode(chunk.value, { stream: true });
+                    var events = buf.split('\n\n');
+                    buf = events.pop();
+                    events.forEach(function(ev) {
+                        if (self.paused || ev.indexOf('data: ') !== 0) return;
+                        try {
+                            self.appendEntry(JSON.parse(ev.substring(6)));
+                        } catch (ex) { /* ignore parse errors */ }
+                    });
+                    return pump();
+                });
+            }
+            return pump();
+        }).catch(function(err) {
+            if (err && err.name === 'AbortError') return;
             self.appendLine('--- Log stream disconnected ---', 'ERROR');
-        };
+        });
     },
 
     appendEntry: function(entry) {

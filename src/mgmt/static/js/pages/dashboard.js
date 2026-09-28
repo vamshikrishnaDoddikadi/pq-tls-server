@@ -381,7 +381,7 @@ var DashboardPage = {
 
             html += '<div class="upstream-bar">' +
                 '<span class="upstream-dot ' + status + '"></span>' +
-                '<span class="upstream-bar-label">' + addr + '</span>' +
+                '<span class="upstream-bar-label">' + escHtml(addr) + '</span>' +
                 '<div class="upstream-bar-track"><div class="upstream-bar-fill ' + status + '" style="width:' + pct + '%"></div></div>' +
             '</div>';
         }

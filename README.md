@@ -14,7 +14,7 @@
 
 **Post-Quantum TLS Termination Reverse Proxy**
 
-A production-ready server that terminates TLS 1.3 connections using post-quantum key exchange (ML-KEM-768 / Kyber) and proxies traffic to your existing backend services. Drop it in front of any HTTP server to make it quantum-resistant — no application changes required.
+A production-ready server that terminates TLS 1.3 connections using hybrid post-quantum key exchange (X25519 + ML-KEM-768, FIPS 203) and proxies traffic to your existing backend services. Drop it in front of any HTTP server to protect traffic against "harvest now, decrypt later" attacks — no application changes required.
 
 ## How it works
 
@@ -27,11 +27,16 @@ Clients                    PQ-TLS Server                    Your Backend
   │                              │                               │
 ```
 
-Clients connect with TLS 1.3 using hybrid post-quantum key exchange (X25519MLKEM768). The server decrypts the traffic and forwards it to your backend over plain HTTP or TCP. Clients that don't support post-quantum algorithms automatically fall back to classical X25519.
+Clients connect with TLS 1.3 using hybrid post-quantum key exchange (X25519MLKEM768 or SecP256r1MLKEM768). The server decrypts the traffic and forwards it to your backend over plain HTTP or TCP. By default, clients that don't support post-quantum algorithms fall back to classical X25519/P-256; with `--require-pq` they are refused instead.
+
+Every request forwarded to the backend carries authoritative `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-PQ-KEM` / `X-PQ-Group` / `X-PQ-Cipher` headers; any client-supplied copies are removed, so your application can trust them.
 
 ## Features
 
-- **Post-Quantum Key Exchange** — ML-KEM-768 (FIPS 203) hybrid with X25519
+- **Post-Quantum Key Exchange** — ML-KEM-768 (FIPS 203) hybrids with X25519 / P-256, using OpenSSL 3.5's native implementation or oqs-provider on OpenSSL 3.0–3.4
+- **Enforceable PQ Policy** — `--require-pq` offers only PQ groups, forces TLS 1.3 and re-checks every connection; unsupported groups are detected at startup and reported, never silently dropped
+- **Safe Header Forwarding** — Streaming HTTP/1.1 rewriter strips spoofed forwarding headers on every keep-alive request and rejects request-smuggling patterns (CL+TE, obs-fold, bad chunking)
+- **Resilient Connection Handling** — Per-connection threads bounded by `max_connections`, handshake / request-head / idle timeouts, graceful drain on `SIGTERM`, IPv6
 - **Crypto-Agility** — Pluggable provider registry with dynamic algorithm loading, policy engine, and negotiation audit log
 - **Visual Management UI** — Configure everything from a browser — no config files, no CLI flags
 - **HUD Dashboard** — Cyberpunk command-center UI with 3-column grid, real-time charts, SSE streaming, and glow effects
@@ -49,58 +54,65 @@ Clients connect with TLS 1.3 using hybrid post-quantum key exchange (X25519MLKEM
 - **Real-time Log Viewer** — Stream logs in the browser with level filters and search
 - **PQ Negotiation Stats** — Track ML-KEM vs classical X25519 handshake ratios
 - **Single Binary** — Everything embedded, zero runtime dependencies beyond OpenSSL + liboqs
+- **Tested End to End** — Unit suites under ASan/UBSan plus real PQ handshakes in CI on OpenSSL 3.0 + oqs-provider and OpenSSL 3.5 native
 
 ## Quick Start
 
 ```bash
-# 0. Set OQS provider path (required for post-quantum key exchange)
-export OPENSSL_MODULES=/usr/local/lib/ossl-modules  # or path to oqsprovider.so
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# 1. Build the pinned PQ dependencies (liboqs, oqs-provider) and the server
+scripts/build-deps.sh            # add --no-provider on OpenSSL >= 3.5
+cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release && ninja -C build
 
-# 1. Generate test certificates
-./scripts/gen-certs.sh
-
-# 2. Start your backend (e.g., a local web server on port 8080)
+# 2. Generate test certificates and start a backend
+scripts/gen-certs.sh
 python3 -m http.server 8080 &
 
-# 3. Run PQ-TLS Server with dashboard
-./build/bin/pq-tls-server \
-    -c certs/server.crt \
-    -k certs/server.key \
-    -b 127.0.0.1:8080 \
-    -H 9090 \
-    -g X25519MLKEM768:X25519
+# 3. Run PQ-TLS Server (dashboard on :9090)
+./build/bin/pq-tls-server -c certs/server.crt -k certs/server.key \
+    -b 127.0.0.1:8080 -H 9090
 
-# 4. Open dashboard at http://localhost:9090
-
-# 5. Verify PQ key exchange
-curl -skv https://localhost:8443/ 2>&1 | grep "SSL connection"
-# Expected: TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768
+# 4. Verify the key exchange — the server logs "group=X25519MLKEM768 pq=yes"
+export OPENSSL_MODULES=$PWD/vendor/oqs-provider/build/lib   # OpenSSL < 3.5 only
+openssl s_client -connect localhost:8443 -groups X25519MLKEM768 </dev/null
 ```
 
-> **OQS Provider:** The server auto-loads `oqsprovider.so` via OpenSSL 3's provider API.
-> Ensure `OPENSSL_MODULES` points to the directory containing `oqsprovider.so`.
-> Without it, the server falls back to classical key exchange (ECDH).
+Or run everything (deps, build, tests, demo certificates, backend, server) with
+`scripts/build-and-run.sh`.
+
+> **Which OpenSSL?** OpenSSL 3.5+ implements the hybrid ML-KEM groups natively and
+> needs nothing else. On OpenSSL 3.0–3.4 the server loads `oqsprovider.so`
+> (auto-detected in `vendor/`, or via `OPENSSL_MODULES`). At startup it logs the
+> groups it actually offers and warns loudly if none of them is post-quantum.
 
 ## Building
 
 ### Prerequisites
 
-- Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+)
-- OpenSSL 3.0+ with development headers
-- liboqs 0.11+ (Open Quantum Safe)
-- oqs-provider for OpenSSL
-- CMake 3.16+, GCC or Clang
+- Linux (Debian 12+/Ubuntu 22.04+, RHEL 9+)
+- OpenSSL 3.0+ with development headers (3.5+ recommended: native ML-KEM)
+- CMake 3.16+, Ninja or Make, GCC or Clang, git, curl
+- liboqs 0.15.0 and — for OpenSSL < 3.5 — oqs-provider 0.11.0. Both are built
+  by `scripts/build-deps.sh` from the versions and commit hashes pinned in
+  `scripts/deps.env`.
 
 ### Build from source
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+scripts/build-deps.sh
+cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+ninja -C build
 ```
 
-The binary is at `build/bin/pq-tls-server`.
+The binary is at `build/bin/pq-tls-server`. `-DCMAKE_BUILD_TYPE=Debug` enables
+AddressSanitizer and UndefinedBehaviorSanitizer.
+
+### Tests
+
+```bash
+./build/bin/pq-tls-tests                     # unit tests
+tests/e2e/e2e.sh build/bin/pq-tls-server     # end-to-end: real PQ handshakes,
+                                             # header rewriting, timeouts, reload
+```
 
 ### Install system-wide
 
@@ -112,17 +124,21 @@ This installs the binary to `/usr/local/bin/`, the default config to `/etc/pq-tl
 
 ### Docker
 
+The image is based on Debian 13 (OpenSSL 3.5, native ML-KEM) and runs the unit
+and end-to-end suites during the build.
+
 ```bash
 docker build -t pq-tls-server .
 docker run -p 8443:8443 -p 9090:9090 \
     -v ./certs:/etc/pq-tls-server/certs:ro \
-    pq-tls-server --backend host.docker.internal:8080 --health-port 9090
+    pq-tls-server --config /etc/pq-tls-server/pq-tls-server.conf \
+                  --backend host.docker.internal:8080 --health-port 9090
 ```
 
-Or with docker-compose:
+Or with docker compose:
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 ## Configuration
@@ -145,8 +161,11 @@ See `etc/pq-tls-server.conf` for a fully commented example.
 | `-k, --key FILE` | TLS private key (PEM) | *required* |
 | `-b, --backend ADDR` | Upstream backend (repeatable) | *required* |
 | `-p, --port PORT` | Listen port | 8443 |
-| `-g, --groups LIST` | TLS key exchange groups | X25519MLKEM768:X25519 |
-| `-w, --workers N` | Worker threads (0 = auto) | 0 |
+| `-f, --config FILE` | INI config file | `/etc/pq-tls-server/pq-tls-server.conf` if present |
+| `-g, --groups LIST` | TLS key exchange groups, in preference order | X25519MLKEM768:SecP256r1MLKEM768:X25519:P-256 |
+| `-Q, --require-pq` | Refuse clients that cannot negotiate PQ key exchange | off |
+| `-m, --mode MODE` | `http` (rewrite forwarding headers) or `tcp` (opaque relay) | http |
+| `-w, --workers N` | Acceptor threads (0 = auto); connections get their own threads | 0 |
 | `-l, --log FILE` | Log file | stderr |
 | `-j, --json-log` | Structured JSON logging | off |
 | `-v, --verbose` | Debug logging | off |
@@ -161,16 +180,48 @@ See `etc/pq-tls-server.conf` for a fully commented example.
 # Plain TCP
 --backend 127.0.0.1:8080
 
+# IPv6
+--backend [::1]:8080
+
 # Multiple weighted backends
 --backend 10.0.0.1:8080;weight=3
 --backend 10.0.0.2:8080;weight=1
 
 # Unix domain socket
 --backend unix:/var/run/app.sock
-
-# TLS backend
---backend tls://10.0.0.1:443
 ```
+
+TLS to backends (`tls://`) is not supported yet and is rejected at startup —
+keep backends on a trusted network or a Unix socket.
+
+### Post-quantum policy
+
+| Setting | Behaviour |
+|---------|-----------|
+| default | Offers `X25519MLKEM768:SecP256r1MLKEM768:X25519:P-256`. PQ-capable clients (Chrome, Firefox, Edge, curl/OpenSSL 3.5, Go 1.24+) negotiate a hybrid PQ group; others fall back to a classical group. |
+| `--require-pq` / `[tls] require_pq = true` | Offers only PQ groups and TLS 1.3; classical-only clients fail the handshake, and every connection is re-checked after the handshake. Refuses to start if no PQ group is available. |
+
+Groups the loaded OpenSSL providers do not support are skipped with a warning.
+The groups actually offered are logged at startup and exposed as
+`tls.effective_groups` in `/api/config`, `tls_groups` in `/api/stats`, and the
+`pqtls_pq_available` / `pqtls_pq_required` metrics.
+
+### Headers sent to your backend
+
+In `http` mode (the default) every request — including each request on a
+keep-alive connection — is forwarded with:
+
+| Header | Value |
+|--------|-------|
+| `X-Forwarded-For`, `X-Real-IP` | client IP address |
+| `X-Forwarded-Proto` | `https` |
+| `X-PQ-KEM` | negotiated group if post-quantum, otherwise `none` |
+| `X-PQ-Group`, `X-PQ-Cipher` | negotiated group and cipher suite |
+
+Client-supplied `X-Forwarded-*`, `X-Real-IP`, `Forwarded` and `X-PQ-*` headers
+are removed (including `_` spellings). Requests with ambiguous framing are
+answered with `400`, oversized heads with `431`, and slow heads with `408`.
+Use `--mode tcp` for non-HTTP protocols.
 
 ### Management Dashboard
 
@@ -178,14 +229,16 @@ See `etc/pq-tls-server.conf` for a fully commented example.
 pq-tls-server --health-port 9090 ...
 ```
 
-Open `http://localhost:9090` for the full management UI. On first visit, a setup wizard guides you through creating an admin account.
+Open `http://localhost:9090` for the full management UI. On first visit, a setup wizard guides you through creating an admin account; it asks for the one-time **setup token** the server prints to its log at startup, so nobody else who can reach the port can claim the account first.
+
+> The dashboard speaks plain HTTP. Keep it on a trusted network (`[mgmt] localhost_only = true` binds it to 127.0.0.1) or put it behind an authenticating TLS reverse proxy.
 
 **Dashboard pages:**
 - **Dashboard** — HUD-style 3-column grid with 9 real-data panels: TLS config, PQ adoption ring, system info, connection/throughput charts, live handshake terminal, PQ vs classical doughnut, data transfer, upstream health
 - **TLS / SSL** — View cert details, configure groups, reload certificates
 - **Upstreams** — Add/edit/remove backend servers, view health status
 - **Security** — Rate limiting + ACL management (changes apply instantly)
-- **Settings** — Listen address, workers, logging configuration
+- **Settings** — Listen address, workers, logging configuration (TLS and upstream changes apply live; invalid TLS settings are rolled back)
 - **Certificates** — Upload PEM certs, generate self-signed, apply + reload
 - **Logs** — Real-time log viewer with level filters and search
 
@@ -239,11 +292,15 @@ entry = 192.168.1.0/24
 ### Hot Certificate Reload
 
 ```bash
-# Reload TLS certificates without downtime
+# Reload TLS certificates and TLS settings without downtime
 kill -HUP $(cat /var/run/pq-tls-server.pid)
 ```
 
-Existing connections continue with the old certificate. New connections use the reloaded certificate.
+Existing connections continue with the old certificate. New connections use the reloaded certificate. If the new configuration fails to load, the previous one stays active.
+
+### Graceful Shutdown
+
+On `SIGTERM`/`SIGINT` the server stops accepting, lets in-flight connections finish for up to `[server] drain_timeout` (default 10 s), then closes the rest. Idle keep-alive connections are closed immediately.
 
 ### Benchmarking
 
@@ -335,11 +392,11 @@ The final report includes success rate, PQ vs classical negotiation counts, and 
 | Algorithm | Type | Security Level | Status |
 |-----------|------|---------------|--------|
 | ML-KEM-512 | KEM | NIST Level 1 | Registry provider |
-| ML-KEM-768 | Hybrid KEM | NIST Level 3 | **Default** |
+| ML-KEM-768 | Hybrid KEM (TLS: X25519MLKEM768, SecP256r1MLKEM768) | NIST Level 3 | **Default** |
 | ML-KEM-1024 | KEM | NIST Level 5 | Registry provider |
-| HQC-128 | KEM (code-based) | NIST Level 1 | Registry provider |
-| HQC-192 | KEM (code-based) | NIST Level 3 | Registry provider |
-| HQC-256 | KEM (code-based) | NIST Level 5 | Registry provider |
+| HQC-128 | KEM (code-based) | NIST Level 1 | Registry provider (needs a liboqs build with HQC) |
+| HQC-192 | KEM (code-based) | NIST Level 3 | Registry provider (needs a liboqs build with HQC) |
+| HQC-256 | KEM (code-based) | NIST Level 5 | Registry provider (needs a liboqs build with HQC) |
 | ML-DSA-44 | Signature | NIST Level 2 | Registry provider |
 | ML-DSA-65 | Signature | NIST Level 3 | Registry provider |
 | ML-DSA-87 | Signature | NIST Level 5 | Registry provider |
@@ -347,7 +404,7 @@ The final report includes success rate, PQ vs classical negotiation counts, and 
 | P-256 | Classical ECDH | ~128-bit | Registry provider |
 | Ed25519 | Classical Sig | ~128-bit | Benchmark baseline |
 
-The server uses ML-KEM-768 (Kyber) for key encapsulation, combined with X25519 in a hybrid mode. This means connections are secure against both classical and quantum attacks.
+The server uses ML-KEM-768 (FIPS 203, formerly Kyber) for key encapsulation, combined with X25519 or P-256 in the hybrid TLS groups from draft-ietf-tls-ecdhe-mlkem. An attacker must break both the classical and the post-quantum component to recover the session keys.
 
 All algorithms are managed through the **crypto-agility registry**, which supports runtime provider registration, dynamic plugin loading, policy-based filtering, and negotiation audit logging. Additional algorithms can be added via shared library plugins without recompiling the server.
 
@@ -442,7 +499,9 @@ scrape_configs:
     metrics_path: '/metrics'
 ```
 
-Available metrics: `pqtls_connections_total`, `pqtls_connections_active`, `pqtls_handshake_failures_total`, `pqtls_bytes_received_total`, `pqtls_bytes_sent_total`, `pqtls_pq_negotiations_total`, `pqtls_classical_negotiations_total`, `pqtls_workers`.
+Available metrics: `pqtls_connections_total`, `pqtls_connections_active`, `pqtls_handshake_failures_total`, `pqtls_bytes_received_total`, `pqtls_bytes_sent_total`, `pqtls_pq_negotiations_total`, `pqtls_classical_negotiations_total`, `pqtls_pq_rejected_total`, `pqtls_rate_limited_total`, `pqtls_overload_rejected_total`, `pqtls_bad_requests_total`, `pqtls_pq_available`, `pqtls_pq_required`, `pqtls_max_connections`, `pqtls_workers`, `pqtls_uptime_seconds`, `pqtls_build_info`.
+
+A useful alert: `pqtls_pq_available == 0` (the server is running without post-quantum key exchange).
 
 ## Why Post-Quantum?
 
@@ -470,7 +529,7 @@ PQ-TLS Server uses a **benevolent-dictator-for-life (BDFL)** governance model wi
 
 ### Versioning
 
-This project follows [Semantic Versioning 2.0.0](https://semver.org/). Breaking changes to public API increment the major version. The current release is **v2.2.0**.
+This project follows [Semantic Versioning 2.0.0](https://semver.org/). Breaking changes to public API increment the major version. The current release is **v2.3.0**.
 
 ### Roadmap
 

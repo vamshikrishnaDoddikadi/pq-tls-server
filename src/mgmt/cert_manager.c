@@ -295,8 +295,9 @@ int cert_generate_self_signed(const char *cn, const char *org,
 
     /* Write key (encrypted at rest with passphrase, no TOCTOU window) */
     {
-        int fd = open(key_out_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int fd = open(key_out_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd < 0) { unlink(cert_out_path); goto cleanup; }
+        (void)fchmod(fd, 0600);  /* O_TRUNC keeps the mode of an existing file */
         FILE *fp = fdopen(fd, "w");
         if (!fp) { close(fd); unlink(cert_out_path); goto cleanup; }
 
@@ -355,11 +356,11 @@ int cert_apply(const char *cert_src, const char *key_src,
     /* Copy key */
     src = fopen(key_src, "r");
     if (!src) { unlink(tmp_cert); return -1; }
-    tfd = open(tmp_key, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    tfd = open(tmp_key, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (tfd < 0) { fclose(src); unlink(tmp_cert); return -1; }
+    (void)fchmod(tfd, 0600);
     dst = fdopen(tfd, "w");
     if (!dst) { close(tfd); fclose(src); unlink(tmp_cert); return -1; }
-    if (!dst) { fclose(src); unlink(tmp_cert); return -1; }
 
     while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
         if (fwrite(buf, 1, n, dst) != n) { err = 1; break; }
@@ -388,6 +389,20 @@ int cert_save_upload(const char *store_dir, const char *name,
                      const char *cert_pem, size_t cert_len,
                      const char *key_pem, size_t key_len) {
     if (!store_dir || !name || !cert_pem || cert_len == 0) return -1;
+
+    /* M-12: defense in depth — the name becomes part of a file path, so
+     * accept only a plain file-name stem regardless of what callers check. */
+    {
+        size_t n = strlen(name);
+        if (n == 0 || n > 64 || name[0] == '.') return -1;
+        for (size_t i = 0; i < n; i++) {
+            char c = name[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+                return -1;
+        }
+        if (strstr(name, "..")) return -1;
+    }
 
     /* ── H-5: Path Traversal validation for store_dir (CWE-22) ────────────
      * Resolve store_dir to its canonical absolute path and verify it is
@@ -460,14 +475,13 @@ int cert_save_upload(const char *store_dir, const char *name,
 
     if (key_pem && key_len > 0) {
         snprintf(key_path, sizeof(key_path), "%s/%s-key.pem", store_dir, name);
-        int kfd = open(key_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int kfd = open(key_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (kfd < 0) { unlink(cert_path); return -1; }
+        (void)fchmod(kfd, 0600);  /* before writing: an existing file keeps its mode */
         fp = fdopen(kfd, "w");
         if (!fp) { close(kfd); unlink(cert_path); return -1; }
-        if (!fp) return -1;
         if (fwrite(key_pem, 1, key_len, fp) != key_len) { fclose(fp); unlink(cert_path); return -1; }
-        fclose(fp);
-        chmod(key_path, 0600);
+        if (fclose(fp) != 0) { unlink(cert_path); return -1; }
     }
 
     return 0;

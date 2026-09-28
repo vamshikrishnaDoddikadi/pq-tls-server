@@ -36,10 +36,47 @@ static struct {
 } auth;
 
 static void hex_encode(const unsigned char *in, size_t in_len, char *out) {
+    static const char digits[] = "0123456789abcdef";
     for (size_t i = 0; i < in_len; i++) {
-        sprintf(out + i * 2, "%02x", in[i]);
+        out[i * 2]     = digits[in[i] >> 4];
+        out[i * 2 + 1] = digits[in[i] & 0x0f];
     }
     out[in_len * 2] = '\0';
+}
+
+/* ---- One-time first-run setup token ----
+ * Until an admin account exists, /api/auth/setup would let anyone who can
+ * reach the dashboard create it. The setup token is generated at startup,
+ * printed to the server log only, and required to complete setup. */
+static char g_setup_token[33];
+static pthread_mutex_t g_setup_lock = PTHREAD_MUTEX_INITIALIZER;
+
+const char *mgmt_auth_setup_token_init(void) {
+    pthread_mutex_lock(&g_setup_lock);
+    if (!g_setup_token[0]) {
+        unsigned char raw[16];
+        if (RAND_bytes(raw, sizeof(raw)) == 1) hex_encode(raw, sizeof(raw), g_setup_token);
+        OPENSSL_cleanse(raw, sizeof(raw));
+    }
+    pthread_mutex_unlock(&g_setup_lock);
+    return g_setup_token;
+}
+
+int mgmt_auth_setup_token_check(const char *token) {
+    int ok = 0;
+    pthread_mutex_lock(&g_setup_lock);
+    size_t n = strlen(g_setup_token);
+    if (n == 32 && token && strlen(token) == n)
+        ok = CRYPTO_memcmp(token, g_setup_token, n) == 0;
+    pthread_mutex_unlock(&g_setup_lock);
+    return ok;
+}
+
+void mgmt_auth_setup_token_clear(void) {
+    pthread_mutex_lock(&g_setup_lock);
+    OPENSSL_cleanse(g_setup_token, sizeof(g_setup_token));
+    g_setup_token[0] = '\0';
+    pthread_mutex_unlock(&g_setup_lock);
 }
 
 static int hex_decode(const char *in, unsigned char *out, size_t out_max) {
@@ -390,6 +427,20 @@ int mgmt_auth_login_rate_check(const char *ip, int success) {
             slot = i; break;
         }
         if (!login_rl.entries[i].active && free_slot < 0) free_slot = i;
+    }
+    if (slot < 0 && free_slot < 0) {
+        /* Table full: recycle the stalest entry that is not currently
+         * blocked. Never fail open — that would let an attacker spread
+         * guesses over many source addresses to bypass the limit. */
+        time_t oldest = 0;
+        for (int i = 0; i < MGMT_LOGIN_MAX_TRACKED; i++) {
+            if (login_rl.entries[i].blocked_until > now) continue;
+            if (free_slot < 0 || login_rl.entries[i].first_fail < oldest) {
+                free_slot = i;
+                oldest = login_rl.entries[i].first_fail;
+            }
+        }
+        if (free_slot < 0) return success ? 1 : 0;   /* everyone is blocked */
     }
     if (slot < 0 && free_slot >= 0) {
         slot = free_slot;

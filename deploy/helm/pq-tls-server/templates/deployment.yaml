@@ -28,6 +28,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "pq-tls-server.serviceAccountName" . }}
+      # Must exceed server.drainTimeoutMs so SIGTERM can drain connections.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -49,14 +51,10 @@ spec:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
+          {{- with .Values.extraEnv }}
           env:
-            - name: OPENSSL_MODULES
-              value: /app/vendor/oqs-provider/build/lib
-            - name: LD_LIBRARY_PATH
-              value: /app/vendor/liboqs/lib
-            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

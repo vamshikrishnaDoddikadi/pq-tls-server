@@ -165,7 +165,7 @@ TEST(test_multiple_fds) {
 
     /* Write data to first pipe */
     const char *msg = "test";
-    (void)write(pairs[0][1], msg, strlen(msg));
+    ASSERT(write(pairs[0][1], msg, strlen(msg)) == (ssize_t)strlen(msg));
 
     /* Run reactor */
     int events = pq_reactor_run(reactor, 100);

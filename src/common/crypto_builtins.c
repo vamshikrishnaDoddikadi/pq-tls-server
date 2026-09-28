@@ -91,7 +91,7 @@ int pq_registry_register_builtins(pq_registry_t *reg)
     if (rc != PQ_SUCCESS)
         fprintf(stderr, "[builtins] X25519+ML-KEM-768 hybrid: %s\n", pq_error_string(rc));
 
-    /* X25519 + ML-KEM-512 (not validated with oqs-provider 0.7.0) */
+    /* X25519 + ML-KEM-512 (no standard TLS codepoint; used by the benchmarks only) */
     pq_hybrid_kem_t h_x25519_mlkem512 = {
         .label      = "X25519 + ML-KEM-512",
         .tls_group  = "",
@@ -104,7 +104,7 @@ int pq_registry_register_builtins(pq_registry_t *reg)
     if (rc != PQ_SUCCESS)
         fprintf(stderr, "[builtins] X25519+ML-KEM-512 hybrid: %s\n", pq_error_string(rc));
 
-    /* X25519 + ML-KEM-1024 (not validated with oqs-provider 0.7.0) */
+    /* X25519 + ML-KEM-1024 (no standard TLS codepoint; used by the benchmarks only) */
     pq_hybrid_kem_t h_x25519_mlkem1024 = {
         .label      = "X25519 + ML-KEM-1024",
         .tls_group  = "",
@@ -117,7 +117,7 @@ int pq_registry_register_builtins(pq_registry_t *reg)
     if (rc != PQ_SUCCESS)
         fprintf(stderr, "[builtins] X25519+ML-KEM-1024 hybrid: %s\n", pq_error_string(rc));
 
-    /* P-256 + ML-KEM-768 (not validated with oqs-provider 0.7.0) */
+    /* P-256 + ML-KEM-768 (no standard TLS codepoint; used by the benchmarks only) */
     pq_hybrid_kem_t h_p256_mlkem768 = {
         .label      = "P-256 + ML-KEM-768",
         .tls_group  = "",
@@ -145,7 +145,7 @@ int pq_registry_register_builtins(pq_registry_t *reg)
 
     pq_hybrid_kem_t h_p256_only = {
         .label      = "P-256 (classical)",
-        .tls_group  = "prime256v1",
+        .tls_group  = "P-256",
         .classical  = pq_kem_provider_p256(),
         .pq         = NULL,
         .combiner   = NULL,

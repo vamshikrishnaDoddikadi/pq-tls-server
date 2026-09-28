@@ -29,6 +29,15 @@ typedef enum {
 } pq_acl_mode_t;
 
 /* ======================================================================== */
+/* Proxy mode                                                               */
+/* ======================================================================== */
+
+typedef enum {
+    PQ_PROXY_MODE_HTTP = 0,   /* HTTP/1.x aware: rewrite forwarding headers   */
+    PQ_PROXY_MODE_TCP  = 1    /* opaque byte stream (any protocol)             */
+} pq_proxy_mode_t;
+
+/* ======================================================================== */
 /* Upstream backend definition                                              */
 /* ======================================================================== */
 
@@ -57,16 +66,19 @@ typedef struct {
     int       require_pq;                 /* Fail if PQ unavailable (C-2/H-3) */
     int       tls_min_version;            /* 0x0303=TLS1.2, 0x0304=TLS1.3 */
     int       session_cache_size;         /* 0 = disabled, >0 = cache size */
+    int       handshake_timeout_ms;       /* TLS handshake / request-head deadline */
 
     /* --- Upstream backends --- */
     pq_upstream_t upstreams[PQ_MAX_UPSTREAMS];
     int           upstream_count;
-    int           upstream_timeout_ms;
+    int           upstream_timeout_ms;          /* idle timeout while relaying */
     int           upstream_connect_timeout_ms;
+    pq_proxy_mode_t proxy_mode;                 /* http (default) or tcp       */
 
     /* --- Worker threads --- */
-    int       worker_threads;             /* 0 = auto (nproc)             */
-    int       max_connections;
+    int       worker_threads;             /* acceptor threads, 0 = auto   */
+    int       max_connections;            /* concurrent client connections */
+    int       drain_timeout_ms;           /* graceful shutdown drain window */
 
     /* --- Logging --- */
     char      log_file[PQ_MAX_PATH];      /* empty = stderr               */

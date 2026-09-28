@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <pthread.h>
 #include <time.h>
@@ -24,7 +25,7 @@ struct pq_conn_pool {
     conn_node_t    *lists[PQ_MAX_UPSTREAMS];  /* One list per upstream */
     int             max_per_backend;
     int             max_total;
-    int             current_total;
+    int             current_total;  /* idle connections held in lists[] */
     pthread_mutex_t lock;
 };
 
@@ -72,22 +73,29 @@ void pq_conn_pool_destroy(pq_conn_pool_t *pool)
     free(pool);
 }
 
-/* Check if a connection is still alive using MSG_PEEK */
-static int is_connection_alive(int fd)
+/*
+ * Check whether an idle pooled connection may be reused.
+ *
+ * An idle upstream connection must have nothing to read: EOF means the
+ * backend closed it, and any readable bytes are unsolicited data (e.g. a
+ * late or extra response) that would otherwise be handed to the next
+ * client as its response (response desync). Only "would block" means the
+ * connection is alive and clean.
+ */
+static int is_connection_reusable(int fd)
 {
-    char byte;
-    int result = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-    /* result == 0 means EOF (connection closed) */
-    if (result == 0)
+    if (fd < 0)
         return 0;
-    /* result > 0 means data available (good) */
-    if (result > 0)
-        return 1;
-    /* result == -1: EAGAIN/EWOULDBLOCK means no data yet (connection alive),
-       any other errno means the connection is broken */
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return 1;
-    return 0;
+
+    char byte;
+    ssize_t result;
+    do {
+        result = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    } while (result < 0 && errno == EINTR);
+
+    if (result >= 0)
+        return 0;   /* EOF (0) or stray data (> 0): not reusable */
+    return errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
 __attribute__((hot))
@@ -96,55 +104,36 @@ pq_pooled_conn_t* pq_conn_pool_acquire(pq_conn_pool_t *pool, int upstream_idx)
     if (__builtin_expect(!pool || upstream_idx < 0 || upstream_idx >= PQ_MAX_UPSTREAMS, 0))
         return NULL;
 
+    /* Allocate outside the lock; freed again if nothing usable is pooled */
+    pq_pooled_conn_t *result = malloc(sizeof(*result));
+    if (__builtin_expect(result == NULL, 0))
+        return NULL;
+
     pthread_mutex_lock(&pool->lock);
 
-    conn_node_t *node = pool->lists[upstream_idx];
-    conn_node_t *prev = NULL;
+    conn_node_t *node;
+    while ((node = pool->lists[upstream_idx]) != NULL) {
+        /* Unlink the head: it leaves the pool either way */
+        pool->lists[upstream_idx] = node->next;
+        pool->current_total--;
 
-    while (node) {
-        /* Check if connection is still alive */
-        if (__builtin_expect(is_connection_alive(node->conn.fd), 1)) {
-            /* Found a good connection */
-            node->conn.in_use = 1;
-            node->conn.last_used = time(NULL);
-
-            /* Remove from list */
-            if (prev)
-                prev->next = node->next;
-            else
-                pool->lists[upstream_idx] = node->next;
-
-            /* Copy connection before freeing node to avoid use-after-free */
-            pq_pooled_conn_t *result = malloc(sizeof(*result));
-            if (__builtin_expect(result != NULL, 1)) {
-                memcpy(result, &node->conn, sizeof(*result));
-                free(node);
-                pthread_mutex_unlock(&pool->lock);
-                return result;
-            }
-            /* Allocation failed, put node back */
-            node->next = pool->lists[upstream_idx];
-            pool->lists[upstream_idx] = node;
+        if (__builtin_expect(is_connection_reusable(node->conn.fd), 1)) {
+            memcpy(result, &node->conn, sizeof(*result));
+            result->in_use = 1;
+            result->last_used = time(NULL);
             pthread_mutex_unlock(&pool->lock);
-            return NULL;
+            free(node);
+            return result;
         }
 
-        /* Connection is dead, remove it */
-        if (prev)
-            prev->next = node->next;
-        else
-            pool->lists[upstream_idx] = node->next;
-
+        /* Closed by peer, broken, or holding stray bytes: discard */
         if (node->conn.fd >= 0)
             close(node->conn.fd);
-
-        conn_node_t *dead_node = node;
-        node = node->next;
-        pool->current_total--;
-        free(dead_node);
+        free(node);
     }
 
     pthread_mutex_unlock(&pool->lock);
+    free(result);
     return NULL;
 }
 
@@ -156,20 +145,18 @@ void pq_conn_pool_release(pq_conn_pool_t *pool, pq_pooled_conn_t *conn)
     conn->in_use = 0;
     conn->last_used = time(NULL);
 
-    /* Fast-path: count existing connections for this upstream */
-    int count = 0;
+    /* Allocate outside the lock */
+    conn_node_t *new_node = NULL;
+    if (conn->fd >= 0)
+        new_node = malloc(sizeof(*new_node));
+
     pthread_mutex_lock(&pool->lock);
-    {
-        conn_node_t *node = pool->lists[conn->upstream_idx];
-        while (node) {
+    if (__builtin_expect(new_node != NULL, 1)) {
+        int count = 0;
+        for (conn_node_t *node = pool->lists[conn->upstream_idx]; node; node = node->next)
             count++;
-            node = node->next;
-        }
-    }
-    /* Minimize critical section: only protect list operations */
-    if (__builtin_expect(count < pool->max_per_backend && pool->current_total < pool->max_total, 1)) {
-        conn_node_t *new_node = malloc(sizeof(*new_node));
-        if (__builtin_expect(new_node != NULL, 1)) {
+
+        if (count < pool->max_per_backend && pool->current_total < pool->max_total) {
             memcpy(&new_node->conn, conn, sizeof(*conn));
             new_node->next = pool->lists[conn->upstream_idx];
             pool->lists[conn->upstream_idx] = new_node;
@@ -182,23 +169,24 @@ void pq_conn_pool_release(pq_conn_pool_t *pool, pq_pooled_conn_t *conn)
     pthread_mutex_unlock(&pool->lock);
 
     /* Can't return to pool, close it */
+    free(new_node);
     if (conn->fd >= 0)
         close(conn->fd);
     free(conn);
 }
 
+/*
+ * Close a connection handed out by pq_conn_pool_acquire() (or never pooled).
+ * Such a connection is no longer in the pool and is not part of
+ * current_total, so the count is not touched here.
+ */
 void pq_conn_pool_remove(pq_conn_pool_t *pool, pq_pooled_conn_t *conn)
 {
-    if (!pool || !conn || conn->upstream_idx < 0 || conn->upstream_idx >= PQ_MAX_UPSTREAMS)
+    if (!pool || !conn)
         return;
-
-    pthread_mutex_lock(&pool->lock);
 
     if (conn->fd >= 0)
         close(conn->fd);
-    pool->current_total--;
-
-    pthread_mutex_unlock(&pool->lock);
     free(conn);
 }
 

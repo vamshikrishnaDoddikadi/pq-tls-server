@@ -2,7 +2,7 @@
  * PQ-TLS Management — SPA Router & App Controller
  */
 window.escHtml = function(s) {
-    if (!s) return '';
+    if (s === null || s === undefined) return '';
     var d = document.createElement('div');
     d.textContent = String(s);
     return d.innerHTML;

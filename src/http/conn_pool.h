@@ -39,20 +39,27 @@ void pq_conn_pool_destroy(pq_conn_pool_t *pool);
  *
  * upstream_idx: Index of the backend (0-15)
  *
- * Returns a pooled connection if available and still connected, or NULL.
- * Marks the connection as in_use.
+ * Returns a heap-allocated pooled connection if one is available and
+ * reusable, or NULL. A pooled connection is only reusable if it has no
+ * pending data and has not been closed by the peer; connections with EOF,
+ * errors or unsolicited readable bytes are closed and discarded.
+ * The returned connection no longer counts against the pool limits; hand it
+ * back with pq_conn_pool_release() or close it with pq_conn_pool_remove().
  */
 pq_pooled_conn_t* pq_conn_pool_acquire(pq_conn_pool_t *pool, int upstream_idx);
 
 /*
- * Release a connection back to the pool.
+ * Release a connection back to the pool (takes ownership of conn).
  *
- * Marks the connection as not in_use and updates last_used time.
+ * Marks the connection as not in_use and updates last_used time. If the
+ * per-backend or total idle limit is reached, the connection is closed.
+ * conn must be heap-allocated (malloc) and is freed by this call.
  */
 void pq_conn_pool_release(pq_conn_pool_t *pool, pq_pooled_conn_t *conn);
 
 /*
- * Remove and close a connection.
+ * Close and free a connection obtained from pq_conn_pool_acquire() (or a
+ * heap-allocated connection that was never pooled).
  *
  * Used when a connection is detected as broken or should not be reused.
  */

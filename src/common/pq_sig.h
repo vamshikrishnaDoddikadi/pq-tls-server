@@ -78,7 +78,11 @@ typedef enum {
 #define PQ_SIG_ECDSA_P256_SIGNATURE_BYTES  72   /**< ECDSA P-256 max signature size (DER) */
 
 #define PQ_SIG_RSA2048_PUBLICKEY_BYTES  294   /**< RSA-2048 public key size (DER) */
-#define PQ_SIG_RSA2048_SECRETKEY_BYTES  1192  /**< RSA-2048 secret key size (DER) */
+/** RSA-2048 secret key buffer size: PKCS#1 DER, zero padded.  The DER length
+ *  varies per key (observed 1188..1193, ASN.1 maximum 1194 for a 2048-bit
+ *  modulus with e = 65537); the previous value 1192 made ~5% of key
+ *  generations fail. */
+#define PQ_SIG_RSA2048_SECRETKEY_BYTES  1216
 #define PQ_SIG_RSA2048_SIGNATURE_BYTES  256   /**< RSA-2048 signature size */
 
 /* ========================================================================
@@ -108,15 +112,23 @@ int pq_sig_keypair(int algorithm, uint8_t *pk, uint8_t *sk);
  * The signature can be verified by anyone with the corresponding public key.
  *
  * @param algorithm Signature algorithm identifier (PQ_SIG_MLDSA* or PQ_SIG_*)
- * @param sig Output buffer for signature (must be pq_sig_signature_bytes() size)
- * @param sig_len Output parameter for actual signature length
+ * @param sig Output buffer for the signature
+ * @param sig_len IN: capacity of @p sig in bytes, which must be at least
+ *                pq_sig_signature_bytes(algorithm) (otherwise
+ *                PQ_ERR_BUFFER_TOO_SMALL is returned and nothing is signed).
+ *                OUT: actual signature length on success, 0 on failure.
+ *                Callers MUST (re)initialise *sig_len to the buffer capacity
+ *                before every call - passing 0 or a stale length fails.
  * @param msg Message to sign
  * @param msg_len Length of message in bytes
  * @param sk Signer's secret key
- * @return PQ_SUCCESS on success, error code on failure
+ * @return PQ_SUCCESS on success, error code on failure (the signature buffer
+ *         is wiped on failure)
  *
- * @note The actual signature length may be less than the maximum for some algorithms.
- *       Always check sig_len after successful signing.
+ * @note The actual signature length may be less than the maximum for some
+ *       algorithms (ECDSA DER encoding).  Always use *sig_len after signing.
+ * @note For ML-DSA the liboqs-reported key/signature sizes are checked
+ *       against the PQ_SIG_MLDSA* constants at runtime; a mismatch is an error.
  */
 int pq_sig_sign(int algorithm, uint8_t *sig, size_t *sig_len,
                 const uint8_t *msg, size_t msg_len, const uint8_t *sk);
@@ -139,6 +151,18 @@ int pq_sig_sign(int algorithm, uint8_t *sig, size_t *sig_len,
  */
 int pq_sig_verify(int algorithm, const uint8_t *msg, size_t msg_len,
                   const uint8_t *sig, size_t sig_len, const uint8_t *pk);
+
+/**
+ * @brief Known-answer-free self test for a signature algorithm
+ *
+ * Verifies that the backend (liboqs / OpenSSL) provides the algorithm, that
+ * its reported sizes match the constants in this header (ML-DSA), and that a
+ * keygen / sign / verify round trip succeeds and a tampered signature is
+ * rejected.  All secret key material is wiped.
+ *
+ * @return PQ_SUCCESS if the algorithm is usable, error code otherwise
+ */
+int pq_sig_self_test(int algorithm);
 
 /* ========================================================================
  * Signature Size Query Functions

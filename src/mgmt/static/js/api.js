@@ -48,8 +48,9 @@ var API = (function() {
         authStatus: function() {
             return request('GET', '/api/auth/status');
         },
-        setup: function(user, pass) {
-            return request('POST', '/api/auth/setup', { username: user, password: pass });
+        setup: function(user, pass, setupToken) {
+            return request('POST', '/api/auth/setup',
+                           { username: user, password: pass, setup_token: setupToken });
         },
 
         /* Monitoring (no auth) */

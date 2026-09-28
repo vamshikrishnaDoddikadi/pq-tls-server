@@ -33,13 +33,19 @@ var SetupPage = {
                 '<p>This wizard will help you configure your PQ-TLS server ' +
                 'management dashboard.</p>' +
                 '<p>You\'ll create an admin account and optionally configure ' +
-                'basic server settings.</p></div>';
+                'basic server settings.</p></div>' +
+                '<div class="form-group">' +
+                '<label>Setup token</label>' +
+                '<input type="text" id="setupToken" autocomplete="off" spellcheck="false" ' +
+                'placeholder="printed in the server log at startup" value="' +
+                escHtml(this.data.setupToken || '') + '">' +
+                '</div>';
             break;
         case 2:
             body = '<h3 style="font-size:1.1em;margin-bottom:16px">Create Admin Account</h3>' +
                 '<div class="form-group">' +
                 '<label>Username</label>' +
-                '<input type="text" id="setupUser" value="' + (this.data.username || 'admin') + '">' +
+                '<input type="text" id="setupUser" value="' + escHtml(this.data.username || 'admin') + '">' +
                 '</div>' +
                 '<div class="form-group">' +
                 '<label>Password</label>' +
@@ -55,15 +61,15 @@ var SetupPage = {
             body = '<h3 style="font-size:1.1em;margin-bottom:16px">Basic Configuration</h3>' +
                 '<div class="form-group">' +
                 '<label>TLS Certificate Path</label>' +
-                '<input type="text" id="setupCert" value="' + (this.data.cert || 'certs/server-cert.pem') + '">' +
+                '<input type="text" id="setupCert" value="' + escHtml(this.data.cert || 'certs/server-cert.pem') + '">' +
                 '</div>' +
                 '<div class="form-group">' +
                 '<label>TLS Key Path</label>' +
-                '<input type="text" id="setupKey" value="' + (this.data.key || 'certs/server-key.pem') + '">' +
+                '<input type="text" id="setupKey" value="' + escHtml(this.data.key || 'certs/server-key.pem') + '">' +
                 '</div>' +
                 '<div class="form-group">' +
                 '<label>Upstream Backend (host:port)</label>' +
-                '<input type="text" id="setupBackend" value="' + (this.data.backend || '127.0.0.1:8080') + '">' +
+                '<input type="text" id="setupBackend" value="' + escHtml(this.data.backend || '127.0.0.1:8080') + '">' +
                 '</div>' +
                 '<p class="text-muted mt-2">These can be changed later from the dashboard.</p>';
             break;
@@ -71,9 +77,9 @@ var SetupPage = {
             body = '<h3 style="font-size:1.1em;margin-bottom:16px">Review</h3>' +
                 '<dl class="wizard-review">' +
                 '<dt>Admin Username</dt><dd>' + escHtml(this.data.username || '') + '</dd>' +
-                '<dt>Certificate</dt><dd>' + (this.data.cert || 'default') + '</dd>' +
-                '<dt>Key</dt><dd>' + (this.data.key || 'default') + '</dd>' +
-                '<dt>Backend</dt><dd>' + (this.data.backend || 'default') + '</dd>' +
+                '<dt>Certificate</dt><dd>' + escHtml(this.data.cert || 'default') + '</dd>' +
+                '<dt>Key</dt><dd>' + escHtml(this.data.key || 'default') + '</dd>' +
+                '<dt>Backend</dt><dd>' + escHtml(this.data.backend || 'default') + '</dd>' +
                 '</dl>';
             break;
         }
@@ -103,6 +109,14 @@ var SetupPage = {
     },
 
     next: function() {
+        if (this.step === 1) {
+            var tok = (Form.getValue('setupToken') || '').trim();
+            if (!/^[0-9a-f]{32}$/.test(tok)) {
+                Toast.error('Enter the 32-character setup token from the server log');
+                return;
+            }
+            this.data.setupToken = tok;
+        }
         if (this.step === 2) {
             var user = Form.getValue('setupUser');
             var pass = Form.getValue('setupPass');
@@ -142,7 +156,7 @@ var SetupPage = {
     },
 
     finish: function() {
-        API.setup(this.data.username, this.data.password).then(function(data) {
+        API.setup(this.data.username, this.data.password, this.data.setupToken).then(function(data) {
             if (data.token) {
                 API.setToken(data.token);
                 SetupPage.data = {};

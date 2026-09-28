@@ -8,6 +8,48 @@
 
 ---
 
+## Remediation Status (v2.3.0, 2026-09-28)
+
+| ID | Status | Resolution |
+|----|--------|------------|
+| C-1 | Fixed (2.2.1, 2.3.0) | Login rate limiting; in 2.3.0 the limiter no longer fails open when its table is full |
+| C-2 | Fixed (2.3.0) | Dead `oqs_tls_integration` removed; PQ policy implemented in `src/core/tls_policy.c` and used for startup and reload |
+| H-1 | Operational | Build on a distribution OpenSSL that receives security updates; the Docker image uses Debian 13 (OpenSSL 3.5). The version-number check was removed because distributions backport fixes |
+| H-2 | Fixed (2.3.0) | liboqs 0.15.0 (the release oqs-provider 0.11.0 is certified against) built with only ML-KEM/ML-DSA, so HQC/XMSS code is not compiled; pinned by commit in `scripts/deps.env` |
+| H-3 | Fixed (2.3.0) | `--require-pq` / `[tls] require_pq`: PQ-only groups, TLS 1.3, per-connection check; the default config also negotiates PQ again (see CHANGELOG) |
+| H-4 | Fixed (2.2.1) | `PQ_KEY_PASSPHRASE` required |
+| H-5 | Fixed (2.2.1, 2.3.0) | `strtol` everywhere; strict config parsing with `file:line` errors |
+| H-6 | Fixed (2.2.1) | TOTP replay protection |
+| H-7 | Fixed (2.3.0) | Table-based hex encoding |
+| H-8 | Fixed (2.2.1) | TOTP secret cleansed |
+| M-1 | Fixed (2.2.1) | `Secure` cookie (the dashboard authenticates with a bearer token over plain HTTP; keep it on a trusted network) |
+| M-2 – M-5 | Fixed (2.2.1) | `open(O_CREAT, 0600)` + `fdopen`, checked writes |
+| M-6 | Fixed | Request buffer NUL-terminated after every `recv()`; 5 s receive/send timeouts added in 2.3.0 |
+| M-7 | Fixed (2.3.0) | Benchmark allocations checked |
+| M-8 | Accepted | 16 sessions, oldest evicted; login attempts are rate-limited |
+| M-9 | Accepted | TOTP secret stored in the 0600 config file |
+| M-10 | Fixed (2.2.1) | Certificate rename rollback |
+| M-11 | Fixed (2.3.0) | Code removed with `oqs_tls_integration`; key buffers elsewhere are cleansed |
+| M-12 | Fixed (2.3.0) | `cert_save_upload()` validates the name itself |
+| M-13 | Fixed (2.2.1) | Auth audit log (plus `SETUP_TOKEN_FAIL` / `SETUP_COMPLETE` in 2.3.0) |
+| L-1 | Fixed (2.2.1) | `mkdir()` checked |
+| L-2 | Fixed (2.3.0) | `fchmod(0600)` before writing key files; `O_NOFOLLOW` |
+| L-3 | Fixed (2.3.0) | Code removed |
+| L-4 | Fixed (2.3.0) | Groups are probed individually; unsupported ones are reported and skipped |
+| L-5 | Fixed | `OPENSSL_MODULES` is honoured; oqs-provider is loaded only when needed |
+| L-6, L-7 | Fixed (2.3.0) | Strict CLI parsing; benchmark structs initialised |
+
+### Additional findings fixed in 2.3.0
+
+Found by a follow-up review (all have regression tests or end-to-end checks):
+
+- **Critical** — PQ key exchange never negotiated with the default configuration (registry group list rejected by OpenSSL → classical fallback).
+- **Critical** — Unauthenticated first-run setup on a dashboard bound to all interfaces (admin account takeover); now requires a one-time token from the server log.
+- **Critical** — No handshake/IO timeouts and concurrency capped at the CPU count: a handful of idle connections stalled the proxy.
+- **High** — `X-Forwarded-For` / `X-PQ-*` spoofing and request-smuggling gaps in header injection; `tls://` backends silently plaintext; `--require-pq` not enforced per connection; hot reload dropped the PQ policy.
+- **High** — HPACK out-of-bounds read and decoder desync; heap overflow in the HQC provider; hybrid HPKE ignored the ML-KEM secret.
+- **Medium** — ACL runtime updates destroyed a mutex in use and opened allow-all windows; management server blockable by one stalled client or an open log viewer; unbounded unauthenticated stream threads; config writer line injection and loss of `require_pq` / `localhost_only`; wildcard CORS on the admin API; response truncation and use-after-free on shutdown.
+
 ## Executive Summary
 
 **Overall Risk: CRITICAL** — 37 findings (2 Critical, 11 High, 13 Medium, 11 Low).

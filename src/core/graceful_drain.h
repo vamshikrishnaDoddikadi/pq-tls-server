@@ -20,9 +20,9 @@ typedef struct pq_drain_manager pq_drain_manager_t;
 typedef struct {
     int         fd;            /* Socket file descriptor */
     SSL        *ssl;           /* OpenSSL SSL connection */
-    time_t      drain_start;   /* Time when draining began */
+    time_t      drain_start;   /* CLOCK_MONOTONIC seconds when draining began (set by pq_drain_add) */
     int         h2;            /* Is this HTTP/2? */
-    uint32_t    last_stream;   /* Last processed stream ID for HTTP/2 GOAWAY */
+    uint32_t    last_stream;   /* Highest client stream ID processed (odd, or 0), for GOAWAY */
 } pq_draining_conn_t;
 
 /*
@@ -39,9 +39,10 @@ void pq_drain_manager_destroy(pq_drain_manager_t *dm);
 
 /*
  * Add a connection to the draining pool
- * For HTTP/2: sends GOAWAY frame
+ * For HTTP/2: sends GOAWAY frame (before the connection enters the pool)
  * For HTTP/1.1: prepares for graceful close
- * Returns: 0 on success, -1 on error (pool full, etc)
+ * On success the manager owns conn->fd and conn->ssl.
+ * Returns: 0 on success, -1 on error (pool full, etc; caller keeps ownership)
  */
 int pq_drain_add(pq_drain_manager_t *dm, pq_draining_conn_t *conn);
 

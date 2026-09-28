@@ -33,4 +33,12 @@ int pq_mgmt_start(pq_conn_manager_t *mgr, pq_server_config_t *config,
  */
 void pq_mgmt_stop(void);
 
+/**
+ * Run fn(fd, arg) on a dedicated thread for a long-lived response (SSE).
+ * fn owns and must close fd. At most 16 streams run concurrently.
+ * @return 0 on success, -1 if the limit is reached or a thread cannot be
+ *         created (the caller still owns fd).
+ */
+int pq_mgmt_spawn_stream(int fd, void (*fn)(int fd, void *arg), void *arg);
+
 #endif /* PQ_MGMT_SERVER_H */

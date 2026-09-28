@@ -1,8 +1,10 @@
 # =========================================================================
-# PQ-TLS Server — Multi-stage Docker Build (fully vendored)
+# PQ-TLS Server — multi-stage Docker build
 # =========================================================================
-# All PQ dependencies (liboqs, oqs-provider) are built into /app/vendor/
-# inside the image — zero system-wide installs.
+# Debian 13 ships OpenSSL 3.5, which implements the hybrid ML-KEM TLS groups
+# (X25519MLKEM768, SecP256r1MLKEM768) natively, so the image needs no
+# oqs-provider. liboqs is still built (pinned, see scripts/deps.env) for the
+# crypto-agility registry and the benchmark subcommands.
 #
 # Build:
 #   docker build -t pq-tls-server .
@@ -10,95 +12,68 @@
 # Run:
 #   docker run -p 8443:8443 \
 #     -v ./certs:/etc/pq-tls-server/certs:ro \
-#     pq-tls-server --backend host.docker.internal:8080
+#     pq-tls-server --config /etc/pq-tls-server/pq-tls-server.conf \
+#                   --backend host.docker.internal:8080
 # =========================================================================
 
-# --- Stage 1: Build liboqs + oqs-provider + pq-tls-server ---
-FROM ubuntu:22.04 AS builder
+# --- Stage 1: build ------------------------------------------------------
+FROM debian:trixie-slim AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# SECURITY: Always pull latest security-patched packages before building.
-# Ubuntu 22.04 backports OpenSSL CVEs to 3.0.2 (Canonical LTS model).
-# This apt upgrade is the gate for CVE-2026-45447 (HIGH, Jun 2026) and
-# all other OpenSSL 3.x CVEs patched in Ubuntu's security repos.
-RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build git ca-certificates \
-    libssl-dev pkg-config python3 astyle curl xxd \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build git ca-certificates curl xxd \
+        libssl-dev pkg-config python3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+WORKDIR /src
 
-# Build liboqs into /app/vendor/liboqs
-RUN git clone --depth 1 --branch 0.11.0 https://github.com/open-quantum-safe/liboqs.git && \
-    cd liboqs && mkdir build && cd build && \
-    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/app/vendor/liboqs \
-          -DBUILD_SHARED_LIBS=ON \
-          -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65;SIG_ml_dsa_44;SIG_ml_dsa_87" \
-          .. && \
-    ninja && ninja install
+# Dependencies first, so this layer is cached across source changes.
+COPY scripts/deps.env scripts/build-deps.sh scripts/
+RUN VENDOR_DIR=/opt/pq-tls/vendor scripts/build-deps.sh --no-provider
 
-# Build oqs-provider, copy .so into /app/vendor/oqs-provider/build/lib/
-RUN git clone --depth 1 --branch 0.7.0 https://github.com/open-quantum-safe/oqs-provider.git && \
-    cd oqs-provider && mkdir build && cd build && \
-    cmake -GNinja -DCMAKE_BUILD_TYPE=Release \
-          -Dliboqs_DIR=/app/vendor/liboqs/lib/cmake/liboqs \
-          .. && \
-    ninja && \
-    mkdir -p /app/vendor/oqs-provider/build/lib && \
-    cp lib/oqsprovider.so /app/vendor/oqs-provider/build/lib/ 2>/dev/null \
-    || find . -name 'oqsprovider.so' -exec cp {} /app/vendor/oqs-provider/build/lib/ \;
+COPY . .
+RUN bash tools/embed_assets.sh \
+    && cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+        -DOQS_INCLUDE_DIR=/opt/pq-tls/vendor/liboqs/include \
+        -DOQS_LIBRARY=/opt/pq-tls/vendor/liboqs/lib/liboqs.so \
+    && ninja -C build \
+    && ctest --test-dir build --output-on-failure \
+    && LD_LIBRARY_PATH=/opt/pq-tls/vendor/liboqs/lib tests/e2e/e2e.sh build/bin/pq-tls-server
 
-# Copy and build PQ-TLS server against vendored liboqs
-COPY . /build/pq-tls-server
-WORKDIR /build/pq-tls-server
+# --- Stage 2: runtime ----------------------------------------------------
+FROM debian:trixie-slim
 
-# Download Chart.js and embed frontend assets into the binary
-RUN curl -sL -o src/mgmt/static/vendor/chart.min.js \
-      https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js && \
-    bash tools/embed_assets.sh
-
-RUN mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DOQS_INCLUDE_DIR=/app/vendor/liboqs/include \
-          -DOQS_LIBRARY=/app/vendor/liboqs/lib/liboqs.so \
-          .. && \
-    make -j"$(nproc)"
-
-# --- Stage 2: Runtime image ---
-FROM ubuntu:22.04
-
-# SECURITY: apt upgrade pulls latest patched libssl3 (CVE-2026-45447 fix)
-RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
-    libssl3 ca-certificates \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl3t64 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy vendored PQ libraries
-COPY --from=builder /app/vendor/liboqs/lib/ /app/vendor/liboqs/lib/
-COPY --from=builder /app/vendor/oqs-provider/build/lib/oqsprovider.so \
-                    /app/vendor/oqs-provider/build/lib/oqsprovider.so
-
-# Copy server binary and config
-COPY --from=builder /build/pq-tls-server/build/bin/pq-tls-server /app/bin/pq-tls-server
-COPY --from=builder /build/pq-tls-server/etc/pq-tls-server.conf \
-                    /etc/pq-tls-server/pq-tls-server.conf
-
-# Update library cache for vendored libs
+COPY --from=builder /opt/pq-tls/vendor/liboqs/lib/ /app/vendor/liboqs/lib/
 RUN echo "/app/vendor/liboqs/lib" > /etc/ld.so.conf.d/pq-tls.conf && ldconfig
 
-# Tell OpenSSL where to find oqsprovider.so
-ENV OPENSSL_MODULES=/app/vendor/oqs-provider/build/lib
-ENV LD_LIBRARY_PATH=/app/vendor/liboqs/lib
+COPY --from=builder /src/build/bin/pq-tls-server /app/bin/pq-tls-server
+COPY etc/pq-tls-server.conf /etc/pq-tls-server/pq-tls-server.conf
 
-# Create non-root user
-RUN useradd --system --no-create-home pq-tls && \
-    mkdir -p /etc/pq-tls-server/certs /var/log/pq-tls-server && \
-    chown -R pq-tls:pq-tls /var/log/pq-tls-server
+# Fixed numeric UID/GID so Kubernetes runAsNonRoot can verify it.
+RUN groupadd --system --gid 10001 pq-tls \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+               --shell /usr/sbin/nologin pq-tls \
+    && mkdir -p /etc/pq-tls-server/certs /var/log/pq-tls-server \
+    && chown pq-tls:pq-tls /var/log/pq-tls-server
+
+LABEL org.opencontainers.image.title="pq-tls-server" \
+      org.opencontainers.image.description="Post-quantum TLS 1.3 termination reverse proxy (hybrid ML-KEM)" \
+      org.opencontainers.image.source="https://github.com/vamshikrishnaDoddikadi/pq-tls-server" \
+      org.opencontainers.image.licenses="MIT"
 
 EXPOSE 8443 9090
-USER pq-tls
+USER 10001:10001
 
+# The TLS listener accepts TCP connections.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/8443' || exit 1
+
+# SIGTERM triggers a graceful drain (drain_timeout, default 10 s).
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/app/bin/pq-tls-server"]
 CMD ["--config", "/etc/pq-tls-server/pq-tls-server.conf"]

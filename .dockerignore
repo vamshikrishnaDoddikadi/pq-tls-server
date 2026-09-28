@@ -1,0 +1,8 @@
+.git
+build
+build-*
+cmake-build-*
+vendor
+certs
+*.log
+PROD_RELEASE

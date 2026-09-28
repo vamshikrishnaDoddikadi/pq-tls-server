@@ -1,6 +1,6 @@
 # PQ-TLS Server — Installation & Usage Guide
 
-[![Version](https://img.shields.io/badge/version-2.2.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Post-Quantum](https://img.shields.io/badge/Post--Quantum-ML--KEM--768-purple.svg)]()
 
@@ -107,43 +107,26 @@ sudo dnf install -y gcc gcc-c++ make cmake ninja-build git \
     openssl-devel pkgconfig python3 curl
 ```
 
-#### Step 2: Build liboqs
+#### Step 2: Build the pinned PQ dependencies
 
 ```bash
-git clone --depth 1 --branch 0.11.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
-cd /tmp/liboqs && mkdir build && cd build
-
-cmake -GNinja \
-    -DBUILD_SHARED_LIBS=ON \
-    -DCMAKE_INSTALL_PREFIX=/path/to/pq-tls-server/vendor/liboqs \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DOQS_USE_OPENSSL=ON \
-    ..
-
-ninja -j$(nproc)
-ninja install
-cd / && rm -rf /tmp/liboqs
+scripts/build-deps.sh              # liboqs 0.15.0 + oqs-provider 0.11.0 + Chart.js
+# On OpenSSL >= 3.5 (native ML-KEM) the provider is not needed:
+scripts/build-deps.sh --no-provider
 ```
 
-Verify: `ls vendor/liboqs/include/oqs/oqs.h` should exist.
+The script clones the exact tags pinned in `scripts/deps.env`, verifies their
+commit hashes (and the Chart.js tarball checksum), and installs into
+`vendor/`. liboqs is built with only the algorithms this project uses
+(ML-KEM-512/768/1024, ML-DSA-44/65/87). Re-running it skips components that are
+already built.
 
-#### Step 3: Build oqs-provider
+Verify: `ls vendor/liboqs/include/oqs/oqs.h vendor/oqs-provider/build/lib/oqsprovider.so`
 
-```bash
-git clone --depth 1 --branch 0.11.0 https://github.com/open-quantum-safe/oqs-provider.git /tmp/oqs-provider
-cd /tmp/oqs-provider && mkdir build && cd build
-
-cmake -GNinja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -Dliboqs_DIR=/path/to/pq-tls-server/vendor/liboqs/lib/cmake/liboqs \
-    ..
-
-ninja -j$(nproc)
-
-mkdir -p /path/to/pq-tls-server/vendor/oqs-provider/build/lib
-cp lib/oqsprovider.so /path/to/pq-tls-server/vendor/oqs-provider/build/lib/
-cd / && rm -rf /tmp/oqs-provider
-```
+> **Why liboqs 0.15.0 and not the newest release?** oqs-provider 0.11.0 is
+> certified against liboqs 0.15.0 and does not compile against 0.16.0 (which
+> removed SPHINCS+). The minimal build excludes the algorithms affected by
+> later liboqs advisories (XMSS, HQC).
 
 #### Step 4: Build the server
 
@@ -368,20 +351,20 @@ The systemd unit includes security hardening: `NoNewPrivileges`, `ProtectSystem=
 For development on Windows using Windows Subsystem for Linux:
 
 ```bash
-# From within WSL, run the all-in-one build-and-run script:
-bash /mnt/c/Users/<you>/Desktop/pq-tls-server/scripts/build-and-run.sh
+# From within WSL (in your checkout), run the all-in-one script:
+scripts/build-and-run.sh
 ```
 
 This script handles everything automatically:
 
-1. Installs system dependencies (`gcc`, `cmake`, `ninja-build`, `libssl-dev`, etc.)
-2. Builds liboqs 0.11.0 into `vendor/liboqs/`
-3. Builds oqs-provider 0.7.0 into `vendor/oqs-provider/`
-4. Downloads Chart.js and embeds frontend assets
-5. Compiles the server and runs tests
-6. Generates test certificates
-7. Starts a Python demo backend on port 8080
-8. Launches the PQ-TLS server on ports 8443 (TLS) and 9090 (dashboard)
+1. Builds liboqs 0.15.0 and (on OpenSSL < 3.5) oqs-provider 0.11.0 into `vendor/`
+2. Downloads Chart.js (checksum-verified) and embeds frontend assets
+3. Compiles the server and runs the unit tests
+4. Generates a demo CA and server certificate in `build/demo/certs/`
+5. Starts a Python demo backend on port 8080
+6. Launches the PQ-TLS server on ports 8443 (TLS) and 9090 (dashboard, localhost only)
+
+Install the system packages first (`build-essential cmake ninja-build git curl xxd libssl-dev pkg-config python3`).
 
 After launch, access from your Windows browser:
 
@@ -990,6 +973,48 @@ pq-tls-server benchmark --format csv
 ---
 
 ## Upgrading
+
+### From v2.2.x to v2.3.0
+
+**What's New:**
+
+- **Post-quantum key exchange actually negotiates.** In v2.2.x the crypto
+  registry replaced the configured groups with a list OpenSSL rejected, so the
+  server silently fell back to classical key exchange. Check your logs after
+  upgrading: handshakes from modern browsers should show `pq=yes`.
+- **`--require-pq` is enforced** (PQ-only groups, TLS 1.3, per-connection check)
+  and can be set as `[tls] require_pq = true`.
+- **OpenSSL 3.5 native ML-KEM** is used when available; oqs-provider is only
+  loaded when needed. The Docker image is now based on Debian 13.
+- **Header rewriting on every request**, request-smuggling protection,
+  handshake / request-head timeouts, per-connection threads bounded by
+  `max_connections`, graceful drain on shutdown, IPv6 listen addresses.
+- New settings: `[tls] handshake_timeout`, `[upstream] mode = http|tcp`,
+  `[server] drain_timeout`; new metrics (`pqtls_pq_available`,
+  `pqtls_pq_rejected_total`, ...).
+
+**Breaking Changes:**
+
+1. `tls://` backends are rejected at startup. They were never encrypted —
+   traffic was sent in plaintext. Use a plain backend on a trusted network,
+   a `unix:` socket, or a local TLS sidecar.
+2. Configuration files are validated strictly: an invalid value (e.g.
+   `port = abc`, a malformed ACL entry) now stops the server with a
+   `file:line` message instead of being silently ignored. Unknown keys only
+   produce a warning.
+3. Client-supplied `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`,
+   `Forwarded` and `X-PQ-*` headers are removed. If this proxy sits behind
+   another trusted proxy, those headers now carry the address of that proxy.
+4. `workers` now sets the number of acceptor threads; concurrency is bounded
+   by `max_connections` instead of by the worker count.
+5. The default config path is `/etc/pq-tls-server/pq-tls-server.conf`
+   (`/etc/pq-tls-server.conf` is still read if the former does not exist).
+
+**Migration Steps:** rebuild dependencies with `scripts/build-deps.sh` (liboqs
+0.11.0 → 0.15.0, oqs-provider 0.7.0 → 0.11.0), rebuild the server, and start it
+once in the foreground to see any configuration errors.
+
+---
 
 ### From v2.1.0 to v2.2.0
 

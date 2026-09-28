@@ -99,19 +99,38 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Also register HQC as a built-in for benchmarking */
-    pq_registry_register_kem(reg, pq_kem_provider_hqc128());
-    pq_registry_register_kem(reg, pq_kem_provider_hqc192());
-    pq_registry_register_kem(reg, pq_kem_provider_hqc256());
-
-    /* Register HQC hybrids */
-    pq_hybrid_kem_t h_x25519_hqc128 = {
-        .label = "X25519 + HQC-128", .tls_group = "X25519HQC128",
-        .classical = pq_registry_find_kem(reg, "X25519"),
-        .pq = pq_registry_find_kem(reg, "HQC-128"),
-        .combiner = pq_combiner_kdf_concat(), .nist_level = 1,
+    /* Also register HQC as a built-in for benchmarking.  HQC names and sizes
+     * depend on the linked liboqs (and HQC is often compiled out), so only
+     * register the providers that are actually available; their metadata()
+     * then carries the sizes liboqs really uses. */
+    const pq_kem_provider_t *hqc[] = {
+        pq_kem_provider_hqc128(), pq_kem_provider_hqc192(), pq_kem_provider_hqc256(),
     };
-    pq_registry_register_hybrid(reg, &h_x25519_hqc128);
+    for (size_t i = 0; i < sizeof(hqc) / sizeof(hqc[0]); i++) {
+        if (!hqc[i]->is_available()) {
+            printf("Note: %s not available in this liboqs build - skipped\n",
+                   hqc[i]->name());
+            continue;
+        }
+        rc = pq_registry_register_kem(reg, hqc[i]);
+        if (rc != PQ_SUCCESS)
+            fprintf(stderr, "Failed to register %s: %s\n", hqc[i]->name(), pq_error_string(rc));
+    }
+
+    /* Register the HQC hybrid only if both components are present */
+    const pq_kem_provider_t *x25519 = pq_registry_find_kem(reg, "X25519");
+    const pq_kem_provider_t *hqc_l1 = pq_registry_find_kem(reg, pq_kem_provider_hqc128()->name());
+    if (x25519 && hqc_l1) {
+        pq_hybrid_kem_t h_x25519_hqc128 = {
+            .label = "X25519 + HQC-128", .tls_group = "X25519HQC128",
+            .classical = x25519,
+            .pq = hqc_l1,
+            .combiner = pq_combiner_kdf_concat(), .nist_level = 1,
+        };
+        rc = pq_registry_register_hybrid(reg, &h_x25519_hqc128);
+        if (rc != PQ_SUCCESS)
+            fprintf(stderr, "Failed to register X25519 + HQC-128: %s\n", pq_error_string(rc));
+    }
 
     /* Load plugins if specified */
     if (plugin_dir) {
