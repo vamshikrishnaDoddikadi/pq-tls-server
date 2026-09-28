@@ -5,6 +5,10 @@
  * @date 2026
  */
 
+/* These tests use assert(): keep it active in Release (-DNDEBUG) builds,
+ * otherwise every check would compile away. */
+#undef NDEBUG
+
 #include "../src/common/crypto_registry.h"
 #include "../src/common/kem_mlkem.h"
 #include "../src/common/kem_classical.h"

@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-09-28
+
+### Security
+- **Post-quantum key exchange was silently disabled.** The crypto registry
+  replaced the configured groups with a list OpenSSL rejects as a whole
+  (`prime256v1` and `P-256` are the same group), so the server fell back to
+  OpenSSL's classical defaults: PQ-capable clients negotiated plain X25519.
+  Configured groups are now authoritative and each one is probed; unsupported
+  groups are skipped with a warning and a loud error is logged if no PQ group
+  remains.
+- **`--require-pq` is enforced**: PQ-only groups, TLS 1.3 only, and every
+  connection is re-checked after the handshake. Hot reloads can no longer
+  drop the policy.
+- **First-run setup takeover**: `/api/auth/setup` was unauthenticated on a
+  dashboard listening on all interfaces; it now requires a one-time token
+  printed to the server log.
+- **Forwarded-header spoofing / request smuggling**: headers were injected
+  only into the first read of a connection and client-supplied
+  `X-Forwarded-For` / `X-PQ-*` were passed through. Every request is now
+  rewritten by a framing-aware HTTP/1.1 parser that strips spoofed headers and
+  rejects ambiguous requests (CL+TE, obs-fold, invalid chunking).
+- **`tls://` backends were plaintext** (the flag was parsed but ignored);
+  they are now rejected at startup.
+- Denial of service: a few idle connections could occupy every worker (no
+  timeouts, workers = CPU count); one stalled client could block the whole
+  management server; unauthenticated stream endpoint spawned unbounded
+  threads.
+- HPACK out-of-bounds read and decoder desync; HTTP/1.1 parser smuggling
+  gaps; heap overflow in the HQC provider; hybrid HPKE mode ignored the
+  ML-KEM secret; ACL updates opened an allow-all window; login limiter
+  failed open; config writer allowed line injection and dropped
+  `require_pq` / `localhost_only` on save.
+- Admin API: wildcard CORS removed; CSP, X-Frame-Options, nosniff added.
+
+### Added
+- OpenSSL 3.5+ native ML-KEM support (oqs-provider loaded only when needed);
+  default groups `X25519MLKEM768:SecP256r1MLKEM768:X25519:P-256`.
+- Per-connection threads bounded by `max_connections`; handshake /
+  request-head / idle timeouts; graceful drain on SIGTERM
+  (`[server] drain_timeout`); IPv6 listen and backend addresses.
+- `[tls] require_pq`, `[tls] handshake_timeout`, `[upstream] mode = http|tcp`,
+  `--mode`, `X-Forwarded-Proto` / `X-Real-IP` headers, ALPN `http/1.1`.
+- Prometheus metrics: `pqtls_pq_available`, `pqtls_pq_required`,
+  `pqtls_pq_rejected_total`, `pqtls_rate_limited_total`,
+  `pqtls_overload_rejected_total`, `pqtls_bad_requests_total`,
+  `pqtls_max_connections`, `pqtls_uptime_seconds`, `pqtls_build_info`.
+- RFC 9180-compliant HPKE (test vectors), X-Wing-style hybrid combiner.
+- End-to-end test suite (`tests/e2e/e2e.sh`) with real PQ handshakes; new
+  unit suites (HTTP rewriter, TLS policy, HPACK, graceful drain,
+  master/worker, crypto); CI matrix on OpenSSL 3.0 + oqs-provider and
+  OpenSSL 3.5 native, cppcheck, CodeQL, Dependabot.
+- `scripts/build-deps.sh` + `scripts/deps.env`: pinned, checksum-verified
+  dependencies.
+
+### Changed
+- liboqs 0.11.0 → 0.15.0 (minimal ML-KEM/ML-DSA build), oqs-provider
+  0.7.0 → 0.11.0; Docker image on Debian 13 (OpenSSL 3.5), UID 10001.
+- Strict configuration parsing with `file:line` errors; default config path
+  `/etc/pq-tls-server/pq-tls-server.conf`.
+- TLS changes from the management API apply live and roll back on failure.
+- `workers` now sets acceptor threads.
+
+### Fixed
+- Large responses truncated when the backend closed; lost responses after a
+  client half-close; live log viewer never received data; log stream URL
+  auth broken; benchmarks timed failing Ed25519 signatures; ~5% of RSA-2048
+  key generations failed; graceful drain / GOAWAY / connection-pool bugs;
+  master process never restarted fast-crashing workers; version string
+  mismatch (binary reported 2.0.0).
+
+### Removed
+- `src/tls/oqs_tls_integration.*` (never built; used APIs removed from liboqs).
+
+See INSTALL.md → "Upgrading from v2.2.x to v2.3.0" for breaking changes.
+
 ## [2.2.1] - 2026-06-18
 
 ### Security

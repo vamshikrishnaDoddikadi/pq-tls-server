@@ -229,7 +229,9 @@ Use `--mode tcp` for non-HTTP protocols.
 pq-tls-server --health-port 9090 ...
 ```
 
-Open `http://localhost:9090` for the full management UI. On first visit, a setup wizard guides you through creating an admin account.
+Open `http://localhost:9090` for the full management UI. On first visit, a setup wizard guides you through creating an admin account; it asks for the one-time **setup token** the server prints to its log at startup, so nobody else who can reach the port can claim the account first.
+
+> The dashboard speaks plain HTTP. Keep it on a trusted network (`[mgmt] localhost_only = true` binds it to 127.0.0.1) or put it behind an authenticating TLS reverse proxy.
 
 **Dashboard pages:**
 - **Dashboard** — HUD-style 3-column grid with 9 real-data panels: TLS config, PQ adoption ring, system info, connection/throughput charts, live handshake terminal, PQ vs classical doughnut, data transfer, upstream health
