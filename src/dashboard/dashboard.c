@@ -282,7 +282,7 @@ static void handle_dashboard_request(int fd, pq_conn_manager_t *mgr) {
         }
     }
     else if (strcmp(path, "/metrics") == 0) {
-        char buf[4096];
+        char buf[8192];
         pq_prometheus_format(mgr, buf, sizeof(buf));
         send_response(fd, "200 OK",
                       "text/plain; version=0.0.4; charset=utf-8",

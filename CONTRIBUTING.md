@@ -72,9 +72,9 @@ See [CLA.md](CLA.md) for the full text. Trivial changes (typos, docs under 10 li
 | GCC / Clang | GCC 11+ / Clang 14+ | C11 compiler |
 | CMake | 3.16+ | Build system |
 | OpenSSL | 3.0+ with dev headers | TLS foundation |
-| liboqs | 0.11.0 | Post-quantum algorithms |
-| oqs-provider | 0.7.0 | OpenSSL ↔ liboqs bridge |
-| curl | Any | Chart.js download |
+| liboqs | 0.15.0 (pinned in `scripts/deps.env`) | Post-quantum algorithms |
+| oqs-provider | 0.11.0 (OpenSSL < 3.5 only) | OpenSSL ↔ liboqs bridge |
+| curl, git | Any | Dependency download (`scripts/build-deps.sh`) |
 
 ### Debug Build
 

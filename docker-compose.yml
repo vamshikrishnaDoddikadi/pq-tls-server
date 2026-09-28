@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   pq-tls-server:
     build: .
@@ -9,10 +7,8 @@ services:
     volumes:
       - ./certs:/etc/pq-tls-server/certs:ro
       - ./etc/pq-tls-server.conf:/etc/pq-tls-server/pq-tls-server.conf:ro
-    environment:
-      - OPENSSL_MODULES=/app/vendor/oqs-provider/build/lib
-      - LD_LIBRARY_PATH=/app/vendor/liboqs/lib
     restart: unless-stopped
+    stop_grace_period: 15s   # > drain_timeout, lets in-flight requests finish
     depends_on:
       - backend
 

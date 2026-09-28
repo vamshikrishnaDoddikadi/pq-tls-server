@@ -7,89 +7,118 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
     strategy:
+      fail-fast: false
       matrix:
-        build_type: [Release, Debug]
+        include:
+          - name: OpenSSL 3.0 + oqs-provider · Debug (ASan/UBSan)
+            build_type: Debug
+            provider: true
+            cflags: ""
+          - name: OpenSSL 3.0 + oqs-provider · Release (-Werror)
+            build_type: Release
+            provider: true
+            cflags: "-Werror"
+            artifact: true
+          - name: OpenSSL 3.5 native ML-KEM · Debian 13 (ASan/UBSan)
+            build_type: Debug
+            provider: false
+            cflags: ""
+            container: debian:trixie
 
     steps:
+      - name: Install build dependencies (Debian container)
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates curl xxd \
+            libssl-dev pkg-config python3 openssl
+
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies (Ubuntu)
+        if: ${{ !matrix.container }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build \
-            libssl-dev pkg-config astyle
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build libssl-dev pkg-config xxd
 
-      - name: Build liboqs (vendored)
-        run: |
-          git clone --depth 1 --branch 0.11.0 \
-            https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
-          cd /tmp/liboqs && mkdir build && cd build
-          cmake -GNinja \
-            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/vendor/liboqs \
-            -DBUILD_SHARED_LIBS=ON \
-            -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65;SIG_ml_dsa_44;SIG_ml_dsa_87" \
-            ..
-          ninja
-          ninja install
+      - name: Cache pinned dependencies
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: deps-${{ matrix.container || 'ubuntu-24.04' }}-provider-${{ matrix.provider }}-${{ hashFiles('scripts/deps.env', 'scripts/build-deps.sh') }}
 
-      - name: Build oqs-provider (vendored)
-        run: |
-          git clone --depth 1 --branch 0.7.0 \
-            https://github.com/open-quantum-safe/oqs-provider.git /tmp/oqs-provider
-          cd /tmp/oqs-provider && mkdir build && cd build
-          cmake -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -Dliboqs_DIR=$GITHUB_WORKSPACE/vendor/liboqs/lib/cmake/liboqs \
-            ..
-          ninja
-          mkdir -p $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib
-          cp lib/oqsprovider.so $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib/ 2>/dev/null \
-            || find . -name 'oqsprovider.so' -exec cp {} $GITHUB_WORKSPACE/vendor/oqs-provider/build/lib/ \;
+      - name: Build pinned dependencies (liboqs, oqs-provider, Chart.js)
+        run: scripts/build-deps.sh ${{ !matrix.provider && '--no-provider' || '' }}
 
-      - name: Download Chart.js vendor
-        run: |
-          curl -sL -o src/mgmt/static/vendor/chart.min.js \
-            https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
-
-      - name: Embed frontend assets
+      - name: Embed dashboard assets
         run: bash tools/embed_assets.sh
 
-      - name: Build pq-tls-server
+      - name: Build
         run: |
-          mkdir build && cd build
-          cmake -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DOQS_INCLUDE_DIR=$GITHUB_WORKSPACE/vendor/liboqs/include \
-                -DOQS_LIBRARY=$GITHUB_WORKSPACE/vendor/liboqs/lib/liboqs.so \
-                ..
-          make -j$(nproc)
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_FLAGS="${{ matrix.cflags }}"
+          ninja -C build
 
-      - name: Run tests
-        run: |
-          LD_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/liboqs/lib \
-            ./build/bin/pq-tls-tests
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
 
-      - name: Verify binary
+      - name: End-to-end tests (real PQ handshakes)
         run: |
-          LD_LIBRARY_PATH=$GITHUB_WORKSPACE/vendor/liboqs/lib \
-            ./build/bin/pq-tls-server --help
+          if [ "${{ matrix.provider }}" = "true" ]; then
+            export OPENSSL_MODULES="$PWD/vendor/oqs-provider/build/lib"
+          fi
+          export LD_LIBRARY_PATH="$PWD/vendor/liboqs/lib"
+          tests/e2e/e2e.sh build/bin/pq-tls-server
+
+      - name: Benchmark smoke test
+        run: ./build/bin/pq-tls-server benchmark --iterations 20
 
       - name: Upload binary
-        if: matrix.build_type == 'Release'
+        if: matrix.artifact
         uses: actions/upload-artifact@v4
         with:
           name: pq-tls-server-linux-amd64
-          path: build/bin/pq-tls-server
+          path: |
+            build/bin/pq-tls-server
+            vendor/liboqs/lib/liboqs.so*
+
+  static-analysis:
+    name: Static analysis (cppcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,portability,performance --inline-suppr \
+            --std=c11 -D_GNU_SOURCE --error-exitcode=1 -q \
+            --suppress=missingIncludeSystem \
+            -I src/common -I src/core -I src/http -I src/proxy \
+            -I src/security -I src/mgmt -I src/benchmark \
+            -i src/mgmt/static_assets.c \
+            src tests
 
   docker:
-    runs-on: ubuntu-22.04
-    needs: build
-    if: github.event_name != 'pull_request'
-
+    name: Docker image
+    runs-on: ubuntu-24.04
+    needs: build-test
     steps:
       - uses: actions/checkout@v4
 
@@ -97,7 +126,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -114,11 +143,14 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=git-
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      # The image build runs the unit and end-to-end suites against
+      # OpenSSL 3.5's native ML-KEM before producing the runtime stage.
+      - name: Build (and push on main / tags)
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+          load: ${{ github.event_name == 'pull_request' }}
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

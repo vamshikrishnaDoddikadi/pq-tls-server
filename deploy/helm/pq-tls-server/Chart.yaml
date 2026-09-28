@@ -2,8 +2,8 @@ apiVersion: v2
 name: pq-tls-server
 description: A Helm chart for deploying PQ-TLS Server — Post-Quantum TLS 1.3 Termination Reverse Proxy
 type: application
-version: 0.1.0
-appVersion: "2.2.0"
+version: 0.2.0
+appVersion: "2.3.0"
 icon: https://raw.githubusercontent.com/vamshikrishnaDoddikadi/pq-tls-server/main/.github/logo.png
 home: https://github.com/vamshikrishnaDoddikadi/pq-tls-server
 sources:

@@ -92,21 +92,22 @@ static void setup_signals(void) {
 }
 
 static void setup_resource_limits(void) {
-    /* Ensure RLIMIT_NOFILE is set high enough for many connections. */
+    /* Each connection needs two descriptors (client + backend). Raise the
+     * soft limit as far as the hard limit allows. */
+    const rlim_t desired = 65536;
     struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        rlim_t desired = 65536;  /* Reasonable limit for high-concurrency scenarios */
-        if (rl.rlim_cur < desired) {
-            rl.rlim_cur = desired;
-            if (rl.rlim_max < desired) {
-                rl.rlim_max = desired;
-            }
-            if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
-                fprintf(stderr, "Warning: Could not set RLIMIT_NOFILE to %lu. "
-                        "Current soft limit: %lu\n",
-                        desired, (unsigned long)rl.rlim_cur);
-            }
-        }
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur >= desired) return;
+
+    rlim_t target = desired;
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < target) target = rl.rlim_max;
+    if (target > rl.rlim_cur) {
+        struct rlimit want = { .rlim_cur = target, .rlim_max = rl.rlim_max };
+        if (setrlimit(RLIMIT_NOFILE, &want) == 0) rl.rlim_cur = target;
+    }
+    if (rl.rlim_cur < desired) {
+        fprintf(stderr, "Note: open-file limit is %lu (hard limit %lu); raise it "
+                "(ulimit -n / systemd LimitNOFILE) to serve many connections\n",
+                (unsigned long)rl.rlim_cur, (unsigned long)rl.rlim_max);
     }
 }
 

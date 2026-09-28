@@ -1,0 +1,51 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (C)
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build libssl-dev pkg-config
+
+      - name: Cache pinned dependencies
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: deps-codeql-${{ hashFiles('scripts/deps.env', 'scripts/build-deps.sh') }}
+
+      - name: Build liboqs
+        run: scripts/build-deps.sh --no-provider
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-and-quality
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          ninja -C build
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:c-cpp

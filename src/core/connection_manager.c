@@ -46,6 +46,7 @@
 #include <poll.h>
 #include <netdb.h>
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -939,6 +940,14 @@ pq_conn_manager_t* pq_conn_manager_create(const pq_server_config_t *cfg) {
 
     /* Connection slots */
     mgr->slot_count = cfg->max_connections > 0 ? cfg->max_connections : 1;
+    {
+        struct rlimit rl;
+        rlim_t need = (rlim_t)mgr->slot_count * 2 + 64;   /* client + backend fds */
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < need)
+            LOG_WARN(mgr, "max_connections=%d needs ~%lu file descriptors but the limit is %lu; "
+                     "connections will be refused early (raise ulimit -n)",
+                     mgr->slot_count, (unsigned long)need, (unsigned long)rl.rlim_cur);
+    }
     mgr->slots = calloc((size_t)mgr->slot_count, sizeof(pq_conn_slot_t));
     mgr->free_slots = calloc((size_t)mgr->slot_count, sizeof(int));
     if (!mgr->slots || !mgr->free_slots) goto fail;
