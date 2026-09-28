@@ -301,7 +301,7 @@ int pq_config_load(pq_config_t *config, const char *filename) {
             char *end = strchr(line, ']');
             if (end) {
                 *end = '\0';
-                snprintf(section, sizeof(section), "%s", line + 1);
+                snprintf(section, sizeof(section), "%.*s", (int)sizeof(section) - 1, line + 1);
                 trim_whitespace(section);
             }
             continue;

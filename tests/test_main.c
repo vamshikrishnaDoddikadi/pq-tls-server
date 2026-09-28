@@ -16,6 +16,8 @@ int run_h2_frame_tests(void);
 int run_epoll_reactor_tests(void);
 int run_rate_limiter_tests(void);
 int run_acl_tests(void);
+int run_http_rewriter_tests(void);
+int run_tls_policy_tests(void);
 int run_hpack_tests(void);
 int run_graceful_drain_tests(void);
 int run_master_worker_tests(void);
@@ -32,6 +34,8 @@ static const test_suite_t suites[] = {
     { "Epoll Reactor",      run_epoll_reactor_tests },
     { "Rate Limiter",       run_rate_limiter_tests },
     { "ACL",                run_acl_tests },
+    { "HTTP Rewriter",      run_http_rewriter_tests },
+    { "TLS Policy",         run_tls_policy_tests },
     { "HPACK",              run_hpack_tests },
     { "Graceful Drain",     run_graceful_drain_tests },
     { "Master/Worker",      run_master_worker_tests },

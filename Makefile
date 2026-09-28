@@ -11,6 +11,9 @@ BUILDDIR := $(PROJ)/build
 CC       := gcc
 CFLAGS   := -std=c11 -Wall -Wextra -O2 -fPIC -fstack-protector-strong
 CFLAGS   += -D_GNU_SOURCE
+# Single source of truth for the version: CMakeLists.txt project(VERSION)
+VERSION  := $(shell grep -m1 '^project' $(PROJ)/CMakeLists.txt | grep -o 'VERSION [0-9.]*' | cut -d' ' -f2)
+CFLAGS   += -DPQ_TLS_SERVER_VERSION=\"$(VERSION)\"
 
 # Vendor paths (liboqs only — OpenSSL comes from system libssl-dev)
 # For local development, use symlinked vendor. For production, point to CI's vendor location.
@@ -45,9 +48,11 @@ CORE_SRCS   := $(PROJ)/src/core/server_config.c \
                $(PROJ)/src/core/connection_manager.c \
                $(PROJ)/src/core/epoll_reactor.c \
                $(PROJ)/src/core/graceful_drain.c \
-               $(PROJ)/src/core/master_worker.c
+               $(PROJ)/src/core/master_worker.c \
+               $(PROJ)/src/core/tls_policy.c
 HTTP_SRCS   := $(wildcard $(PROJ)/src/http/*.c)
-PROXY_SRCS  := $(PROJ)/src/proxy/http_proxy.c
+PROXY_SRCS  := $(PROJ)/src/proxy/http_proxy.c \
+               $(PROJ)/src/proxy/http_rewriter.c
 DASH_SRCS   := $(PROJ)/src/dashboard/dashboard.c
 MGMT_SRCS   := $(PROJ)/src/mgmt/mgmt_server.c \
                $(PROJ)/src/mgmt/mgmt_auth.c \
@@ -75,6 +80,8 @@ TEST_MOD_SRCS := $(PROJ)/src/http/http_parser.c \
                  $(PROJ)/src/http/hpack.c \
                  $(PROJ)/src/core/epoll_reactor.c \
                  $(PROJ)/src/core/graceful_drain.c \
+                 $(PROJ)/src/core/tls_policy.c \
+                 $(PROJ)/src/proxy/http_rewriter.c \
                  $(PROJ)/src/security/rate_limiter.c \
                  $(PROJ)/src/security/acl.c
 TEST_ALL_SRCS := $(TEST_SRCS) $(TEST_MOD_SRCS)

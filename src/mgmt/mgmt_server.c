@@ -31,6 +31,7 @@
 
 static pthread_t mgmt_thread;
 static atomic_int mgmt_running = 0;
+static atomic_int mgmt_thread_live = 0;   /* created and not yet joined */
 static pq_conn_manager_t *g_mgr = NULL;
 static pq_server_config_t *g_config = NULL;
 static int g_port = 0;
@@ -424,13 +425,19 @@ int pq_mgmt_start(pq_conn_manager_t *mgr, pq_server_config_t *config,
     atomic_store(&mgmt_running, 1);
 
     if (pthread_create(&mgmt_thread, NULL, mgmt_thread_fn, NULL) != 0) {
+        atomic_store(&mgmt_running, 0);
         return -1;
     }
+    atomic_store(&mgmt_thread_live, 1);
     return 0;
 }
 
 void pq_mgmt_stop(void) {
-    if (!atomic_load(&mgmt_running)) return;
     atomic_store(&mgmt_running, 0);
-    pthread_join(mgmt_thread, NULL);
+    if (!atomic_load(&mgmt_thread_live)) return;
+    /* Called from a request handler (e.g. the restart endpoint): the thread
+     * exits on its own; the owner joins it later from another thread. */
+    if (pthread_equal(pthread_self(), mgmt_thread)) return;
+    if (atomic_exchange(&mgmt_thread_live, 0))
+        pthread_join(mgmt_thread, NULL);
 }

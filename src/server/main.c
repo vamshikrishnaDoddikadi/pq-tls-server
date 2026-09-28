@@ -23,9 +23,22 @@
 #include <sys/stat.h>
 #include <sys/resource.h>
 
+#include <oqs/oqs.h>
+#include <openssl/crypto.h>
+
 extern char **environ;
 
-#define PQ_TLS_SERVER_VERSION "2.0.0"
+/* Set by the build system from the project version (CMakeLists.txt). */
+#ifndef PQ_TLS_SERVER_VERSION
+#define PQ_TLS_SERVER_VERSION "2.3.0"
+#endif
+
+/* Default configuration locations, tried in order when --config is absent. */
+static const char *const default_config_paths[] = {
+    "/etc/pq-tls-server/pq-tls-server.conf",
+    "/etc/pq-tls-server.conf",
+    NULL
+};
 
 static pq_conn_manager_t *g_manager = NULL;
 
@@ -33,8 +46,8 @@ static pq_conn_manager_t *g_manager = NULL;
 /* Signal handling (async-signal-safe: only set flags)                      */
 /* ======================================================================== */
 
-static volatile sig_atomic_t g_shutdown = 0;
-static volatile sig_atomic_t g_reload   = 0;
+static atomic_int g_shutdown = 0;  /* lock-free atomics are async-signal-safe */
+static atomic_int g_reload   = 0;
 
 static void shutdown_handler(int sig) {
     (void)sig;
@@ -101,19 +114,20 @@ static void setup_resource_limits(void) {
 /* Signal watcher thread — polls flags, performs non-async-safe actions     */
 /* ======================================================================== */
 
+static atomic_int g_watcher_exit = 0;
+
 static void* signal_watcher_thread(void *arg) {
     pq_conn_manager_t *mgr = (pq_conn_manager_t*)arg;
 
-    while (!g_shutdown) {
-        if (g_reload) {
-            g_reload = 0;
+    while (!g_shutdown && !g_watcher_exit) {
+        if (atomic_exchange(&g_reload, 0)) {
             pq_conn_manager_reload(mgr);
         }
         usleep(500000); /* Check every 500ms */
     }
 
-    /* Shutdown was requested — perform the actual stop from this
-     * non-signal context where it's safe to call any function. */
+    /* Shutdown was requested (or the server stopped for another reason) —
+     * perform the actual stop from this non-signal context. */
     pq_conn_manager_stop(mgr);
     return NULL;
 }
@@ -123,15 +137,10 @@ static void* signal_watcher_thread(void *arg) {
 /* ======================================================================== */
 
 static void print_banner(void) {
-    printf("\n"
-           "  ╔═══════════════════════════════════════════════════╗\n"
-           "  ║        PQ-TLS Server v%s                      ║\n"
-           "  ║   Post-Quantum TLS Termination Reverse Proxy      ║\n"
-           "  ║                                                    ║\n"
-           "  ║   Key Exchange: X25519 + ML-KEM-768 (Kyber)       ║\n"
-           "  ║   Protocol:     TLS 1.3                            ║\n"
-           "  ╚═══════════════════════════════════════════════════╝\n\n",
-           PQ_TLS_SERVER_VERSION);
+    printf("\n  PQ-TLS Server v%s — Post-Quantum TLS 1.3 Termination Reverse Proxy\n"
+           "  Hybrid key exchange: X25519MLKEM768 (ML-KEM, FIPS 203)\n"
+           "  %s, liboqs %s\n\n",
+           PQ_TLS_SERVER_VERSION, OpenSSL_version(OPENSSL_VERSION), OQS_version());
 }
 
 static void print_help(const char *prog) {
@@ -144,13 +153,14 @@ static void print_help(const char *prog) {
     printf("  -c, --cert FILE      TLS certificate file (PEM)\n");
     printf("  -k, --key FILE       TLS private key file (PEM)\n");
     printf("  -a, --ca FILE        CA certificate for client auth\n");
-    printf("  -b, --backend ADDR   Upstream backend (host:port, repeatable)\n");
-    printf("                       Supports: host:port, tls://host:port,\n");
-    printf("                       unix:/path/to/sock, host:port;weight=N\n");
-    printf("  -g, --groups LIST    TLS key exchange groups\n");
-    printf("                       (default: X25519MLKEM768:X25519)\n");
-    printf("  -Q, --require-pq     Require post-quantum key exchange\n");
-    printf("  -w, --workers N      Worker threads (0 = auto)\n");
+    printf("  -b, --backend ADDR   Upstream backend (repeatable): host:port,\n");
+    printf("                       [ipv6]:port, unix:/path/to/sock, host:port;weight=N\n");
+    printf("  -m, --mode MODE      http (default: rewrites X-Forwarded-*/X-PQ-* headers)\n");
+    printf("                       or tcp (opaque byte relay for non-HTTP protocols)\n");
+    printf("  -g, --groups LIST    TLS key exchange groups, in preference order\n");
+    printf("                       (default: X25519MLKEM768:SecP256r1MLKEM768:X25519:P-256)\n");
+    printf("  -Q, --require-pq     Refuse clients that cannot do post-quantum key exchange\n");
+    printf("  -w, --workers N      Acceptor threads (0 = auto)\n");
     printf("  -l, --log FILE       Log file (default: stderr)\n");
     printf("  -j, --json-log       Enable structured JSON logging\n");
     printf("  -v, --verbose        Enable debug logging\n");
@@ -171,7 +181,9 @@ static void print_help(const char *prog) {
     printf("\nExamples:\n");
     printf("  %s -c cert.pem -k key.pem -b 127.0.0.1:8080\n", prog);
     printf("  %s -c cert.pem -k key.pem -b 127.0.0.1:8080 -H 9090 -R 50 --json-log\n", prog);
-    printf("  %s --config /etc/pq-tls-server.conf\n\n", prog);
+    printf("  %s --config /etc/pq-tls-server/pq-tls-server.conf\n\n", prog);
+    printf("Without --config, %s or %s is loaded if present.\n\n",
+           default_config_paths[0], default_config_paths[1]);
 }
 
 /* ======================================================================== */
@@ -306,7 +318,7 @@ static void daemonize_process(const char *pid_file) {
     if (pid > 0) exit(0); /* parent exits */
 
     setsid();
-    umask(0);
+    umask(027);  /* log/PID files must not become world-writable */
     if (chdir("/") != 0) {
         perror("chdir");
     }
@@ -362,21 +374,28 @@ int main(int argc, char **argv) {
     /* First pass: find --config/-f to load config file first */
     int config_loaded = 0;
     for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--config") == 0)
-            && i + 1 < argc) {
-            if (pq_server_config_load(&config, argv[i + 1]) != 0) {
+        const char *path = NULL;
+        if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--config") == 0) && i + 1 < argc)
+            path = argv[i + 1];
+        else if (strncmp(argv[i], "--config=", 9) == 0)
+            path = argv[i] + 9;
+        if (path) {
+            if (pq_server_config_load(&config, path) != 0) {
                 return 1;
             }
-            snprintf(config.config_file_path, sizeof(config.config_file_path), "%s", argv[i + 1]);
+            snprintf(config.config_file_path, sizeof(config.config_file_path), "%s", path);
             config_loaded = 1;
             break;
         }
     }
-    /* Auto-load default config if none specified */
-    if (!config_loaded) {
-        pq_server_config_load(&config, "/etc/pq-tls-server.conf");
-        snprintf(config.config_file_path, sizeof(config.config_file_path),
-                 "/etc/pq-tls-server.conf");
+    /* Auto-load the default config if one exists (a missing file is fine,
+     * a broken one is not). */
+    for (int i = 0; !config_loaded && default_config_paths[i]; i++) {
+        if (access(default_config_paths[i], F_OK) != 0) continue;
+        if (pq_server_config_load(&config, default_config_paths[i]) != 0) return 1;
+        snprintf(config.config_file_path, sizeof(config.config_file_path), "%s",
+                 default_config_paths[i]);
+        config_loaded = 1;
     }
 
     /* Second pass: CLI args override config file */
@@ -411,6 +430,7 @@ int main(int argc, char **argv) {
 
     setup_signals();
     setup_resource_limits();
+    OQS_init();
 
     /* Create connection manager */
     g_manager = pq_conn_manager_create(&config);
@@ -427,22 +447,27 @@ int main(int argc, char **argv) {
         pq_conn_manager_destroy(g_manager);
         return 1;
     }
-    pthread_detach(sig_tid);
 
     if (!config.daemonize) {
         printf("Server ready. Press Ctrl+C to stop.\n");
         printf("Send SIGHUP to reload certificates.\n\n");
     }
 
-    /* Run server (blocks until stopped) */
-    pq_conn_manager_run(g_manager);
+    /* Run server (blocks until stopped and drained) */
+    int run_rc = pq_conn_manager_run(g_manager);
 
     /* Check if restart was requested by management UI */
     int do_restart = (atomic_load(&g_manager->restart_pending) == 2);
 
+    /* The watcher uses the manager (SIGHUP reload): stop and join it before
+     * the manager is freed. */
+    g_watcher_exit = 1;
+    pthread_join(sig_tid, NULL);
+
     /* Cleanup */
     pq_conn_manager_destroy(g_manager);
     g_manager = NULL;
+    OQS_destroy();
 
     if (do_restart) {
         if (!config.daemonize) {
@@ -464,5 +489,5 @@ int main(int argc, char **argv) {
         unlink(config.pid_file);
     }
 
-    return 0;
+    return run_rc == 0 ? 0 : 1;
 }

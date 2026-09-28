@@ -4,7 +4,7 @@
 # =========================================================================
 
 cmake_minimum_required(VERSION 3.16)
-project(pq-tls-server VERSION 2.2.0 LANGUAGES C)
+project(pq-tls-server VERSION 2.3.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -118,6 +118,7 @@ set(CORE_SOURCES
     src/core/epoll_reactor.c
     src/core/graceful_drain.c
     src/core/master_worker.c
+    src/core/tls_policy.c
 )
 
 set(HTTP_SOURCES
@@ -129,6 +130,7 @@ set(HTTP_SOURCES
 
 set(PROXY_SOURCES
     src/proxy/http_proxy.c
+    src/proxy/http_rewriter.c
 )
 
 set(DASHBOARD_SOURCES
@@ -221,6 +223,10 @@ target_link_libraries(pq-tls-server PRIVATE
     Threads::Threads
 )
 
+target_compile_definitions(pq-tls-server PRIVATE
+    PQ_TLS_SERVER_VERSION="${PROJECT_VERSION}"
+)
+
 set_target_properties(pq-tls-server PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -243,6 +249,8 @@ add_executable(pq-tls-tests
     tests/test_epoll_reactor.c
     tests/test_rate_limiter.c
     tests/test_acl.c
+    tests/test_http_rewriter.c
+    tests/test_tls_policy.c
     tests/test_hpack.c
     tests/test_graceful_drain.c
     tests/test_master_worker.c   # #includes src/core/master_worker.c itself
@@ -253,6 +261,8 @@ add_executable(pq-tls-tests
     src/http/hpack.c
     src/core/epoll_reactor.c
     src/core/graceful_drain.c
+    src/core/tls_policy.c
+    src/proxy/http_rewriter.c
     src/security/rate_limiter.c
     src/security/acl.c
 )
