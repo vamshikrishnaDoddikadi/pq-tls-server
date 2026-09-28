@@ -11,21 +11,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      contents: read
+      contents: write        # commits signatures to the cla-signatures branch
       pull-requests: write
       statuses: write
     steps:
       - name: CLA Assistant
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: cla-assistant/cla-assistant@v2.5.1
+        # contributor-assistant/github-action v2.6.1 (the GitHub Action; the
+        # cla-assistant/cla-assistant repo is the hosted web app, not an action)
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
-          remote-organization-name: vamshikrishnaDoddikadi
-          remote-repository-name: pq-tls-server
           path-to-signatures: cla/signatures.json
           path-to-document: https://github.com/vamshikrishnaDoddikadi/pq-tls-server/blob/main/CLA.md
           branch: cla-signatures
           allowlist: dependabot[bot],github-actions[bot],vamshikrishnaDoddikadi
-          auto-merge: true
