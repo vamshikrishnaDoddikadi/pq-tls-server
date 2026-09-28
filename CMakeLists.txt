@@ -243,12 +243,16 @@ add_executable(pq-tls-tests
     tests/test_epoll_reactor.c
     tests/test_rate_limiter.c
     tests/test_acl.c
+    tests/test_hpack.c
+    tests/test_graceful_drain.c
+    tests/test_master_worker.c   # #includes src/core/master_worker.c itself
     # Dependencies for the modules under test
     src/http/http_parser.c
     src/http/conn_pool.c
     src/http/h2_frame.c
     src/http/hpack.c
     src/core/epoll_reactor.c
+    src/core/graceful_drain.c
     src/security/rate_limiter.c
     src/security/acl.c
 )

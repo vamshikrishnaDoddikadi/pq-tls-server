@@ -10,6 +10,9 @@
 #include <string.h>
 #include <assert.h>
 #include <time.h>
+#include <stdint.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Include the rate limiter header */
 #include "../src/security/rate_limiter.h"
@@ -182,6 +185,145 @@ TEST(test_sustained_rate_limit) {
     PASS("test_sustained_rate_limit");
 }
 
+/* ---- Regression tests ------------------------------------------------ */
+
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Test: MAX_TRACKED_IPS (65536) is enforced, fail closed, then recovers */
+TEST(test_table_capacity_enforced) {
+    const int max_tracked = 65536;
+    char ip[32];
+
+    /* rate 1/s, burst 5: after one allow() an entry needs 1 s to refill */
+    pq_rate_limiter_init(1, 5);
+    uint64_t denials_before = pq_rate_limiter_capacity_denials();
+
+    double start = now_sec();
+    for (int i = 0; i < max_tracked; i++) {
+        snprintf(ip, sizeof(ip), "10.%d.%d.%d", (i >> 16) & 255, (i >> 8) & 255, i & 255);
+        ASSERT(pq_rate_limiter_allow(ip) == 1);
+    }
+    ASSERT(pq_rate_limiter_tracked_ips() == max_tracked);
+
+    /* Nothing is evictable yet (no bucket has refilled): new IP denied */
+    int denied = pq_rate_limiter_allow("192.0.2.1");
+    double filled_in = now_sec() - start;
+    if (filled_in < 0.9) {
+        ASSERT(denied == 0);
+        ASSERT(pq_rate_limiter_capacity_denials() == denials_before + 1);
+        ASSERT(pq_rate_limiter_tracked_ips() == max_tracked);
+    } else {
+        printf("NOTE: table fill took %.2fs, skipping strict fail-closed check\n", filled_in);
+    }
+
+    /* Tracked IPs keep working while the table is full */
+    ASSERT(pq_rate_limiter_allow("10.0.0.7") == 1);
+
+    /* Once buckets have refilled, entries are reclaimed and new IPs pass */
+    struct timespec ts = { 1, 200 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    ASSERT(pq_rate_limiter_allow("192.0.2.2") == 1);
+    ASSERT(pq_rate_limiter_tracked_ips() <= max_tracked);
+
+    /* Periodic cleanup reclaims refilled entries too */
+    nanosleep(&ts, NULL);
+    pq_rate_limiter_cleanup();
+    ASSERT(pq_rate_limiter_tracked_ips() == 0);
+
+    pq_rate_limiter_destroy();
+    ASSERT(pq_rate_limiter_tracked_ips() == 0);
+
+    PASS("test_table_capacity_enforced");
+}
+
+/* Test: re-init reconfigures in place and keeps per-IP state */
+TEST(test_reinit_keeps_state) {
+    pq_rate_limiter_init(1, 2);
+    ASSERT(pq_rate_limiter_allow("198.51.100.1") == 1);
+    ASSERT(pq_rate_limiter_allow("198.51.100.1") == 1);
+    ASSERT(pq_rate_limiter_allow("198.51.100.1") == 0);
+
+    /* Reconfiguring must not hand an exhausted client a fresh burst */
+    pq_rate_limiter_init(1, 2);
+    ASSERT(pq_rate_limiter_allow("198.51.100.1") == 0);
+
+    /* Smaller burst clamps existing buckets */
+    ASSERT(pq_rate_limiter_allow("198.51.100.2") == 1);   /* 1 token left */
+    pq_rate_limiter_reinit(1, 1);
+    ASSERT(pq_rate_limiter_allow("198.51.100.2") == 1);
+    ASSERT(pq_rate_limiter_allow("198.51.100.2") == 0);
+
+    /* reinit(0) disables: everything allowed */
+    pq_rate_limiter_reinit(0, 0);
+    ASSERT(pq_rate_limiter_allow("198.51.100.1") == 1);
+    ASSERT(pq_rate_limiter_tracked_ips() == 0);
+
+    /* burst <= 0 defaults to 2x rate (was computed from the raw argument) */
+    pq_rate_limiter_init(0, 0);            /* rate 100, burst 200 */
+    int ok = 0;
+    for (int i = 0; i < 150; i++)
+        ok += pq_rate_limiter_allow("198.51.100.3");
+    ASSERT(ok == 150);
+
+    /* Over-long keys are not IPs */
+    char longip[128];
+    memset(longip, '1', sizeof(longip) - 1);
+    longip[sizeof(longip) - 1] = '\0';
+    ASSERT(pq_rate_limiter_allow(longip) == 0);
+
+    pq_rate_limiter_destroy();
+    PASS("test_reinit_keeps_state");
+}
+
+/* Test: init/reinit/destroy/cleanup while workers call allow() */
+#define RL_WORKERS 4
+static atomic_int rl_stop;
+
+static void *rl_worker(void *arg)
+{
+    int id = *(const int *)arg;
+    char ip[32];
+    unsigned n = 0;
+    while (!atomic_load(&rl_stop)) {
+        snprintf(ip, sizeof(ip), "172.16.%d.%u", id, n++ % 200);
+        (void)pq_rate_limiter_allow(ip);
+    }
+    return NULL;
+}
+
+TEST(test_concurrent_reconfigure) {
+    pq_rate_limiter_init(1000, 2000);
+    atomic_store(&rl_stop, 0);
+
+    pthread_t th[RL_WORKERS];
+    int ids[RL_WORKERS];
+    for (int i = 0; i < RL_WORKERS; i++) {
+        ids[i] = i;
+        ASSERT(pthread_create(&th[i], NULL, rl_worker, &ids[i]) == 0);
+    }
+
+    for (int i = 0; i < 300; i++) {
+        switch (i % 4) {
+        case 0: pq_rate_limiter_init(100 + i, 0); break;
+        case 1: pq_rate_limiter_cleanup(); break;
+        case 2: pq_rate_limiter_destroy(); break;
+        default: pq_rate_limiter_reinit(50, 60); break;
+        }
+    }
+
+    atomic_store(&rl_stop, 1);
+    for (int i = 0; i < RL_WORKERS; i++)
+        pthread_join(th[i], NULL);
+
+    pq_rate_limiter_destroy();
+    PASS("test_concurrent_reconfigure");
+}
+
 /* Run all rate limiter tests */
 int run_rate_limiter_tests(void) {
     test_init_and_allow();
@@ -191,6 +333,9 @@ int run_rate_limiter_tests(void) {
     test_cleanup();
     test_burst_independence();
     test_sustained_rate_limit();
+    test_table_capacity_enforced();
+    test_reinit_keeps_state();
+    test_concurrent_reconfigure();
 
     return 0;
 }

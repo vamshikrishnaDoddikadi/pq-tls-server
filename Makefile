@@ -74,6 +74,7 @@ TEST_MOD_SRCS := $(PROJ)/src/http/http_parser.c \
                  $(PROJ)/src/http/h2_frame.c \
                  $(PROJ)/src/http/hpack.c \
                  $(PROJ)/src/core/epoll_reactor.c \
+                 $(PROJ)/src/core/graceful_drain.c \
                  $(PROJ)/src/security/rate_limiter.c \
                  $(PROJ)/src/security/acl.c
 TEST_ALL_SRCS := $(TEST_SRCS) $(TEST_MOD_SRCS)

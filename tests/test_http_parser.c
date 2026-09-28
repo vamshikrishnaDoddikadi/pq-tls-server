@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <stdint.h>
 
 /* Include the HTTP parser header */
 #include "../src/http/http_parser.h"
@@ -275,6 +276,214 @@ TEST(test_max_header_overflow) {
     PASS("test_max_header_overflow");
 }
 
+/* ---- Request smuggling / strictness regression tests ---------------- */
+
+/* Parse a complete request in one shot; returns the status */
+static pq_http_parse_status_t parse_one(pq_http_request_t *req, const char *data, size_t len)
+{
+    size_t consumed = 0;
+    pq_http_request_init(req);
+    return pq_http_request_parse(req, data, len, &consumed);
+}
+
+#define PARSE_STR(req, s) parse_one((req), (s), strlen(s))
+
+/* Test: header names must be tokens immediately followed by ':' */
+TEST(test_header_name_must_be_token) {
+    pq_http_request_t req;
+
+    /* Whitespace before the colon: previously stored as "Transfer-Encoding "
+       which escaped the TE checks and let CL+TE through (smuggling). */
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Transfer-Encoding : chunked\r\n"
+                           "Content-Length: 5\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Content-Length\t: 5\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* Empty field name */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\n: v\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* Space / separators / non-ASCII inside a name */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nBad Name: v\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX(y): v\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX-\xe9: v\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* No colon at all */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nNoColon\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* All tchar punctuation is accepted */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\n"
+                           "X!#$%&'*+-.^_`|~9: v\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(pq_http_request_get_header(&req, "X!#$%&'*+-.^_`|~9") != NULL);
+
+    PASS("test_header_name_must_be_token");
+}
+
+/* Test: every line must end in CRLF; bare CR / bare LF / NUL rejected */
+TEST(test_bare_cr_lf_rejected) {
+    pq_http_request_t req;
+
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\rX-Foo: b\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\nX-Foo: b\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX: \r\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    {
+        static const char nul_req[] = "GET / HTTP/1.1\r\nHost: a\0b\r\n\r\n";
+        ASSERT(parse_one(&req, nul_req, sizeof(nul_req) - 1) == HTTP_PARSE_ERROR);
+    }
+
+    /* Control characters in a field value */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\x01" "b\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\x7f\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* HTAB and obs-text inside a value are fine (no ctype UB on high bytes) */
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX: a\tb \xff\xfe\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(strcmp(pq_http_request_get_header(&req, "X"), "a\tb \xff\xfe") == 0);
+
+    PASS("test_bare_cr_lf_rejected");
+}
+
+/* Test: obs-fold continuation lines are rejected */
+TEST(test_obs_fold_rejected) {
+    pq_http_request_t req;
+
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX-A: 1\r\n  folded\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nX-A: 1\r\n\tfolded\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\n Host: a\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    PASS("test_obs_fold_rejected");
+}
+
+/* Test: Content-Length must be 1*DIGIT without sign or overflow */
+TEST(test_content_length_strict) {
+    pq_http_request_t req;
+    static const char *bad[] = {
+        "+5", "-1", "5a", "0x10", "", "5 5", "5,5", "5, 5",
+        "9223372036854775808", "99999999999999999999999",
+    };
+    char buf[256];
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        snprintf(buf, sizeof(buf), "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: %s\r\n\r\n", bad[i]);
+        if (PARSE_STR(&req, buf) != HTTP_PARSE_ERROR) {
+            fprintf(stderr, "Content-Length '%s' accepted\n", bad[i]);
+            ASSERT(0);
+        }
+    }
+
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.content_length == 0);
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\nContent-Length:  \t42 \t\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.content_length == 42);
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Content-Length: 9223372036854775807\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.content_length == INT64_MAX);
+
+    PASS("test_content_length_strict");
+}
+
+/* Test: duplicate Content-Length only allowed with identical values */
+TEST(test_duplicate_content_length) {
+    pq_http_request_t req;
+
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Content-Length: 5\r\ncontent-length: 6\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Content-Length: 5\r\nContent-Length: 5\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.content_length == 5);
+
+    PASS("test_duplicate_content_length");
+}
+
+/* Test: Transfer-Encoding must be exactly "chunked" */
+TEST(test_transfer_encoding_strict) {
+    pq_http_request_t req;
+    static const char *bad[] = {
+        "gzip, chunked", "chunked, gzip", "identity", "xchunked", "chunked;q=1",
+        "chunked, chunked", "", "\"chunked\"",
+    };
+    char buf[256];
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        snprintf(buf, sizeof(buf), "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: %s\r\n\r\n", bad[i]);
+        if (PARSE_STR(&req, buf) != HTTP_PARSE_ERROR) {
+            fprintf(stderr, "Transfer-Encoding '%s' accepted\n", bad[i]);
+            ASSERT(0);
+        }
+    }
+
+    /* Case-insensitive, surrounding OWS allowed */
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: \t ChUnKeD \t\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.chunked == 1);
+
+    /* Repeated Transfer-Encoding field */
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* CL + TE in either order */
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.1\r\nHost: a\r\n"
+                           "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    /* TE in an HTTP/1.0 request is faulty framing */
+    ASSERT(PARSE_STR(&req, "POST / HTTP/1.0\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    PASS("test_transfer_encoding_strict");
+}
+
+/* Test: more than one Host field line is rejected */
+TEST(test_duplicate_host_rejected) {
+    pq_http_request_t req;
+
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.host != NULL && strcmp(req.host, "a") == 0);
+
+    PASS("test_duplicate_host_rejected");
+}
+
+/* Test: request line is method SP target SP HTTP/d.d exactly */
+TEST(test_request_line_strict) {
+    pq_http_request_t req;
+
+    ASSERT(PARSE_STR(&req, "GET  / HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1 \r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/1.1x\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / http/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET / HTTP/2.0\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, " GET / HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "G(T / HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET /a\x01 HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+    ASSERT(PARSE_STR(&req, "GET /a\tb HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_ERROR);
+
+    ASSERT(PARSE_STR(&req, "PROPFIND /x HTTP/1.1\r\nHost: a\r\n\r\n") == HTTP_PARSE_COMPLETE);
+    ASSERT(req.method == HTTP_METHOD_UNKNOWN);
+
+    PASS("test_request_line_strict");
+}
+
+/* Test: feeding more data after completion does not re-parse headers */
+TEST(test_parse_after_complete) {
+    pq_http_request_t req;
+    const char *head = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nab";
+    size_t consumed = 0;
+
+    pq_http_request_init(&req);
+    ASSERT(pq_http_request_parse(&req, head, strlen(head), &consumed) == HTTP_PARSE_COMPLETE);
+    ASSERT(consumed == strlen(head));
+    ASSERT(req.header_count == 2);
+    ASSERT(req._buf_len - req._body_offset == 2);
+
+    ASSERT(pq_http_request_parse(&req, "c", 1, &consumed) == HTTP_PARSE_COMPLETE);
+    ASSERT(consumed == 0);
+    ASSERT(req.header_count == 2);
+    ASSERT(req.content_length == 3);
+
+    PASS("test_parse_after_complete");
+}
+
 /* Run all HTTP parser tests */
 int run_http_parser_tests(void) {
     test_simple_get();
@@ -288,6 +497,15 @@ int run_http_parser_tests(void) {
     test_request_reset();
     test_header_case_insensitive();
     test_max_header_overflow();
+    test_header_name_must_be_token();
+    test_bare_cr_lf_rejected();
+    test_obs_fold_rejected();
+    test_content_length_strict();
+    test_duplicate_content_length();
+    test_transfer_encoding_strict();
+    test_duplicate_host_rejected();
+    test_request_line_strict();
+    test_parse_after_complete();
 
     return 0;
 }

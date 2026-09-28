@@ -32,6 +32,11 @@ static int _pq_worker_send_control_message(pq_master_t *m, int worker_idx, pq_ct
 static void _pq_master_reap_workers(pq_master_t *m, int block);
 static int _pq_get_cpu_count(void);
 static int _pq_set_nonblocking(int fd);
+static time_t _pq_now(void);
+static int _pq_worker_restart_due(const pq_master_t *m, const pq_worker_info_t *w, time_t now);
+
+/* Exponential restart backoff: restart_delay << min(restart_count, cap) */
+#define PQ_RESTART_BACKOFF_MAX_SHIFT 6
 
 /* Global state for signal handlers */
 static volatile sig_atomic_t g_master_running = 1;
@@ -71,6 +76,18 @@ static void _pq_worker_signal_handler(int sig) {
     default:
         break;
     }
+}
+
+/*
+ * _pq_now - Seconds on the monotonic clock.
+ *
+ * Worker started_at / stopped_at and all supervision timeouts use this
+ * clock so wall-clock adjustments cannot stall restarts or shutdown.
+ */
+static time_t _pq_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
 }
 
 /*
@@ -147,7 +164,8 @@ static int _pq_worker_send_control_message(pq_master_t *m, int worker_idx, pq_ct
  * @param pipe_fd - Read end of control pipe
  * @param msg     - Output: message type
  *
- * Returns: 1 if message read, 0 if no data available, -1 on error
+ * Returns: 1 if message read, 0 if no data available, 2 if the master
+ *          closed its end (EOF), -1 on error
  */
 static int _pq_worker_read_control_message(int pipe_fd, pq_ctl_msg_t *msg) {
     unsigned char msg_byte;
@@ -159,8 +177,8 @@ static int _pq_worker_read_control_message(int pipe_fd, pq_ctl_msg_t *msg) {
     }
 
     if (nread == 0) {
-        /* EOF: master has closed its end */
-        return 0;
+        /* EOF: master has closed its end (exited or crashed) */
+        return 2;
     }
 
     if (nread < 0) {
@@ -183,6 +201,17 @@ static int _pq_worker_read_control_message(int pipe_fd, pq_ctl_msg_t *msg) {
  */
 static int _pq_fork_worker(pq_master_t *m, int worker_idx) {
     pq_worker_info_t *w = &m->workers[worker_idx];
+
+    /* On restart, drop the previous incarnation's control pipe (otherwise
+     * its write end leaks in the master and into every later child). */
+    if (w->pipe_fd[0] >= 0) {
+        close(w->pipe_fd[0]);
+        w->pipe_fd[0] = -1;
+    }
+    if (w->pipe_fd[1] >= 0) {
+        close(w->pipe_fd[1]);
+        w->pipe_fd[1] = -1;
+    }
 
     /* Create control pipe: [0]=read, [1]=write */
     if (pipe(w->pipe_fd) < 0) {
@@ -257,8 +286,7 @@ static int _pq_fork_worker(pq_master_t *m, int worker_idx) {
 
     w->pid = child;
     w->state = PQ_WORKER_RUNNING;
-    w->started_at = time(NULL);
-    w->restart_count++;
+    w->started_at = _pq_now();
 
     syslog(LOG_INFO, "Forked worker %d (PID %d), restart count: %d",
            worker_idx, child, w->restart_count);
@@ -296,7 +324,7 @@ static void _pq_master_reap_workers(pq_master_t *m, int block) {
         }
 
         pq_worker_info_t *w = &m->workers[worker_idx];
-        w->stopped_at = time(NULL);
+        w->stopped_at = _pq_now();
 
         if (WIFEXITED(status)) {
             int exit_code = WEXITSTATUS(status);
@@ -316,6 +344,11 @@ static void _pq_master_reap_workers(pq_master_t *m, int block) {
             syslog(LOG_ERR, "Worker %d (PID %d) terminated by signal %d (%s)",
                    worker_idx, pid, sig, strsignal(sig));
         }
+
+        if (m->running && w->restart_count >= m->max_restarts) {
+            syslog(LOG_ERR, "Worker %d exceeded max restarts (%d), giving up",
+                   worker_idx, m->max_restarts);
+        }
     }
 
     if (pid < 0 && errno != ECHILD) {
@@ -324,38 +357,61 @@ static void _pq_master_reap_workers(pq_master_t *m, int block) {
 }
 
 /*
+ * _pq_worker_restart_due - Has a stopped worker waited out its backoff?
+ *
+ * Exponential backoff measured from the moment the worker stopped:
+ *   restart when now - stopped_at >= restart_delay << min(restart_count, 6)
+ * so the first restart happens after restart_delay seconds and repeated
+ * crashes back off up to 64 * restart_delay. A slot that never ran (its
+ * initial fork failed) is due immediately.
+ */
+static int _pq_worker_restart_due(const pq_master_t *m, const pq_worker_info_t *w, time_t now) {
+    if (w->started_at == 0 && w->stopped_at == 0) {
+        return 1;
+    }
+
+    int shift = w->restart_count;
+    if (shift < 0) shift = 0;
+    if (shift > PQ_RESTART_BACKOFF_MAX_SHIFT) shift = PQ_RESTART_BACKOFF_MAX_SHIFT;
+
+    time_t base = m->restart_delay > 0 ? (time_t)m->restart_delay : 0;
+    time_t delay = base << shift;
+
+    return now - w->stopped_at >= delay;
+}
+
+/*
  * _pq_master_restart_workers - Attempt to restart crashed workers
  *
- * Checks each worker slot and restarts crashed/stopped workers if:
+ * Restarts crashed/stopped workers if:
  * - Restart count is below max_restarts
- * - Worker didn't crash within crash_timeout of being started
+ * - The exponential backoff since the worker stopped has elapsed
  *
  * @param m - Master structure
  */
 static void _pq_master_restart_workers(pq_master_t *m) {
+    time_t now = _pq_now();
+
     for (int i = 0; i < m->worker_count; i++) {
         pq_worker_info_t *w = &m->workers[i];
 
-        if (w->state == PQ_WORKER_RUNNING) {
+        if (w->state == PQ_WORKER_RUNNING || w->state == PQ_WORKER_STOPPING) {
             continue;
         }
 
-        /* Check if we should restart this worker */
+        /* Out of restarts: logged once when the worker stopped */
         if (w->restart_count >= m->max_restarts) {
-            if (w->state != PQ_WORKER_STOPPED) {
-                syslog(LOG_ERR, "Worker %d exceeded max restarts (%d), giving up",
-                       i, m->max_restarts);
-            }
             continue;
         }
 
-        /* Check for crash loop: if worker crashed within crash_timeout of starting */
+        if (!_pq_worker_restart_due(m, w, now)) {
+            continue;   /* still backing off */
+        }
+
         time_t uptime = w->stopped_at - w->started_at;
-        if (uptime < m->crash_timeout) {
-            syslog(LOG_WARNING, "Worker %d crashed after %ld seconds (< %d), escalating backoff",
-                   i, uptime, m->crash_timeout);
-            w->state = PQ_WORKER_CRASHED; /* Mark for future restart */
-            continue; /* Wait before restarting */
+        if (w->started_at != 0 && uptime < m->crash_timeout) {
+            syslog(LOG_WARNING, "Worker %d crashed after %ld seconds (< %d), restarting with backoff",
+                   i, (long)uptime, m->crash_timeout);
         }
 
         /* Attempt restart */
@@ -363,7 +419,9 @@ static void _pq_master_restart_workers(pq_master_t *m) {
                i, w->restart_count + 1, m->max_restarts);
         if (_pq_fork_worker(m, i) < 0) {
             syslog(LOG_ERR, "Failed to restart worker %d", i);
+            continue;   /* retried on a later pass */
         }
+        w->restart_count++;
     }
 }
 
@@ -475,8 +533,6 @@ int pq_master_run(pq_master_t *m) {
     }
 
     /* Main supervision loop */
-    time_t last_restart_attempt = 0;
-
     while (m->running && g_master_running) {
         /* Reap exited workers */
         _pq_master_reap_workers(m, 0);
@@ -497,12 +553,8 @@ int pq_master_run(pq_master_t *m) {
             break;
         }
 
-        /* Attempt to restart crashed workers (with backoff) */
-        time_t now = time(NULL);
-        if (now - last_restart_attempt >= m->restart_delay) {
-            _pq_master_restart_workers(m);
-            last_restart_attempt = now;
-        }
+        /* Restart stopped workers whose per-worker backoff has elapsed */
+        _pq_master_restart_workers(m);
 
         /* Sleep briefly before next iteration */
         sleep(1);
@@ -510,10 +562,10 @@ int pq_master_run(pq_master_t *m) {
 
     /* Graceful shutdown: tell workers to stop and give them time to drain */
     syslog(LOG_NOTICE, "Waiting for workers to exit gracefully");
-    time_t shutdown_start = time(NULL);
+    time_t shutdown_start = _pq_now();
     int timeout = 30; /* 30 seconds graceful shutdown timeout */
 
-    while (time(NULL) - shutdown_start < timeout) {
+    while (_pq_now() - shutdown_start < timeout) {
         _pq_master_reap_workers(m, 0);
 
         int running_count = 0;
@@ -647,7 +699,7 @@ int pq_worker_main(const void *config, int listen_fd, int control_pipe_rd) {
         pq_ctl_msg_t ctl_msg;
         int msg_ready = _pq_worker_read_control_message(control_pipe_rd, &ctl_msg);
 
-        if (msg_ready > 0) {
+        if (msg_ready == 1) {
             switch (ctl_msg) {
             case PQ_CTL_RELOAD:
                 syslog(LOG_NOTICE, "Worker received reload request");
@@ -668,6 +720,10 @@ int pq_worker_main(const void *config, int listen_fd, int control_pipe_rd) {
                 syslog(LOG_WARNING, "Worker received unknown control message %d", ctl_msg);
                 break;
             }
+        } else if (msg_ready == 2) {
+            /* Master is gone: don't linger as an orphan */
+            syslog(LOG_WARNING, "Control pipe closed by master, shutting down");
+            g_worker_running = 0;
         } else if (msg_ready < 0) {
             syslog(LOG_ERR, "Error reading control pipe: %s", strerror(errno));
             return 1;

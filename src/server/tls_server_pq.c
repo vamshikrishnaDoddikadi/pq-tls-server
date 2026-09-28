@@ -92,7 +92,7 @@ static void setup_oqs_provider_path(void) {
         NULL
     };
 
-    char path[PATH_MAX], provider[PATH_MAX];
+    char path[PATH_MAX], provider[PATH_MAX + 32];
     for (int i = 0; suffixes[i]; i++) {
         snprintf(path, sizeof(path), "%s%s", root, suffixes[i]);
         snprintf(provider, sizeof(provider), "%s/oqsprovider.so", path);
@@ -100,6 +100,23 @@ static void setup_oqs_provider_path(void) {
             setenv("OPENSSL_MODULES", path, 1);
             return;
         }
+    }
+}
+
+/**
+ * Free the current client connection (if any) and reset the handles so a
+ * later accept or pq_server_destroy() never frees/closes them twice.
+ */
+static void pq_server_drop_client(pq_server_t *server, int send_close_notify) {
+    if (server->ssl) {
+        if (send_close_notify)
+            SSL_shutdown(server->ssl);
+        SSL_free(server->ssl);
+        server->ssl = NULL;
+    }
+    if (server->client_fd >= 0) {
+        close(server->client_fd);
+        server->client_fd = -1;
     }
 }
 
@@ -255,6 +272,12 @@ pq_server_t* pq_server_create(const char *cert_file, const char *key_file,
 int pq_server_listen(pq_server_t *server, uint16_t port) {
     if (!server) return -1;
 
+    /* Re-listening replaces any previous socket instead of leaking it */
+    if (server->listen_fd >= 0) {
+        close(server->listen_fd);
+        server->listen_fd = -1;
+    }
+
     server->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server->listen_fd < 0) {
         perror("Socket creation failed");
@@ -265,6 +288,7 @@ int pq_server_listen(pq_server_t *server, uint16_t port) {
     if (setsockopt(server->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt failed");
         close(server->listen_fd);
+        server->listen_fd = -1;
         return -1;
     }
 
@@ -277,12 +301,14 @@ int pq_server_listen(pq_server_t *server, uint16_t port) {
              sizeof(server->server_addr)) < 0) {
         perror("Bind failed");
         close(server->listen_fd);
+        server->listen_fd = -1;
         return -1;
     }
 
     if (listen(server->listen_fd, 512) < 0) {
         perror("Listen failed");
         close(server->listen_fd);
+        server->listen_fd = -1;
         return -1;
     }
 
@@ -299,7 +325,10 @@ int pq_server_listen(pq_server_t *server, uint16_t port) {
  * Accept client connection
  */
 int pq_server_accept(pq_server_t *server) {
-    if (!server) return -1;
+    if (!server || server->listen_fd < 0) return -1;
+
+    /* One client at a time: release the previous connection first */
+    pq_server_drop_client(server, 1);
 
     socklen_t addr_len = sizeof(server->client_addr);
     server->client_fd = accept(server->listen_fd,
@@ -307,6 +336,7 @@ int pq_server_accept(pq_server_t *server) {
                               &addr_len);
     if (server->client_fd < 0) {
         perror("Accept failed");
+        server->client_fd = -1;
         return -1;
     }
 
@@ -315,16 +345,19 @@ int pq_server_accept(pq_server_t *server) {
     server->ssl = SSL_new(server->ssl_ctx);
     if (!server->ssl) {
         ERR_print_errors_fp(stderr);
-        close(server->client_fd);
+        pq_server_drop_client(server, 0);
         return -1;
     }
 
-    SSL_set_fd(server->ssl, server->client_fd);
+    if (SSL_set_fd(server->ssl, server->client_fd) != 1) {
+        ERR_print_errors_fp(stderr);
+        pq_server_drop_client(server, 0);
+        return -1;
+    }
 
     if (SSL_accept(server->ssl) != 1) {
         ERR_print_errors_fp(stderr);
-        SSL_free(server->ssl);
-        close(server->client_fd);
+        pq_server_drop_client(server, 0);
         return -1;
     }
 
@@ -357,8 +390,7 @@ int pq_server_accept(pq_server_t *server) {
         if (verify_result != X509_V_OK) {
             fprintf(stderr, "Client certificate verification failed: %s\n",
                     X509_verify_cert_error_string(verify_result));
-            SSL_free(server->ssl);
-            close(server->client_fd);
+            pq_server_drop_client(server, 0);
             return -1;
         }
     }
@@ -386,9 +418,10 @@ int pq_server_accept(pq_server_t *server) {
  * Send data to client
  */
 int pq_server_send(pq_server_t *server, const uint8_t *data, size_t len) {
-    if (!server || !data) return -1;
+    if (!server || !server->ssl || !data) return -1;
+    if (len > INT_MAX) len = INT_MAX;
 
-    int sent = SSL_write(server->ssl, data, len);
+    int sent = SSL_write(server->ssl, data, (int)len);
     if (sent <= 0) {
         int err = SSL_get_error(server->ssl, sent);
         fprintf(stderr, "SSL_write failed with error %d\n", err);
@@ -403,9 +436,10 @@ int pq_server_send(pq_server_t *server, const uint8_t *data, size_t len) {
  * Receive data from client
  */
 int pq_server_recv(pq_server_t *server, uint8_t *buf, size_t buf_len) {
-    if (!server || !buf) return -1;
+    if (!server || !server->ssl || !buf) return -1;
+    if (buf_len > INT_MAX) buf_len = INT_MAX;
 
-    int received = SSL_read(server->ssl, buf, buf_len);
+    int received = SSL_read(server->ssl, buf, (int)buf_len);
     if (received < 0) {
         int err = SSL_get_error(server->ssl, received);
         if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_ZERO_RETURN) {
@@ -432,16 +466,15 @@ void pq_server_get_metrics(pq_server_t *server, double *duration) {
 void pq_server_destroy(pq_server_t *server) {
     if (!server) return;
 
-    if (server->ssl) {
-        SSL_shutdown(server->ssl);
-        SSL_free(server->ssl);
-    }
+    /* SSL objects must go before their SSL_CTX and providers */
+    pq_server_drop_client(server, 1);
     if (server->ssl_ctx) SSL_CTX_free(server->ssl_ctx);
+    server->ssl_ctx = NULL;
     if (server->oqs_provider) OSSL_PROVIDER_unload(server->oqs_provider);
     if (server->default_provider) OSSL_PROVIDER_unload(server->default_provider);
 
-    if (server->client_fd >= 0) close(server->client_fd);
     if (server->listen_fd >= 0) close(server->listen_fd);
+    server->listen_fd = -1;
 
     if (server->log_file) {
         fprintf(server->log_file, "Server destroyed\n");
